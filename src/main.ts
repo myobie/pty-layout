@@ -1,3 +1,4 @@
+#!/usr/bin/env node --experimental-strip-types --no-warnings
 import { hideCursor, showCursor, reset } from "@myobie/pty/tui";
 import { calculateLayout, nextLayoutMode, type LayoutMode, type PaneRect } from "./layout.ts";
 import { createSessionPane, createAttachPane, createLocalPane, closePane, defaultShell, type Pane } from "./pane.ts";
@@ -25,7 +26,8 @@ let panes: Pane[] = [];
 let focusedIndex = 0;
 let layoutMode: LayoutMode = "grid";
 let prevBuffer: CellBuffer | null = null;
-let renderScheduled = false;
+let renderTimer: ReturnType<typeof setTimeout> | null = null;
+let renderTimerDelay = 16;
 let running = false;
 let lastLayout: { paneIndex: number; rect: PaneRect }[] = [];
 let scrollOffsets: number[] = []; // per-pane scroll offset (0 = live viewport)
@@ -40,15 +42,37 @@ function getSize(): [number, number] {
   ];
 }
 
-// --- Render scheduling (throttled ~60fps) ---
+// --- Render scheduling ---
+// Immediate: focused pane echo after keystroke — near-zero input latency.
+// Normal (8ms): background activity from unfocused panes.
 
-function scheduleRender() {
-  if (!running || renderScheduled) return;
-  renderScheduled = true;
-  setTimeout(() => {
-    renderScheduled = false;
+let expectingFocusedEcho = false;
+let renderImmediate: ReturnType<typeof setImmediate> | null = null;
+
+function scheduleRender(urgent = false) {
+  if (!running) return;
+
+  if (urgent) {
+    // Cancel any pending normal timer — immediate wins
+    if (renderTimer !== null) {
+      clearTimeout(renderTimer);
+      renderTimer = null;
+    }
+    if (renderImmediate === null) {
+      renderImmediate = setImmediate(() => {
+        renderImmediate = null;
+        doRender();
+      });
+    }
+    return;
+  }
+
+  // Normal: 8ms delay (skip if an immediate render is pending)
+  if (renderImmediate !== null || renderTimer !== null) return;
+  renderTimer = setTimeout(() => {
+    renderTimer = null;
     doRender();
-  }, 16);
+  }, 8);
 }
 
 function doRender() {
@@ -94,10 +118,10 @@ function doRender() {
 
 function addPane(pane: Pane) {
   pane.handle.onActivity = () => {
-    scheduleRender();
+    const urgent = panes[focusedIndex] === pane && expectingFocusedEcho;
+    if (urgent) expectingFocusedEcho = false;
+    scheduleRender(urgent);
     if (pane.handle.exited) {
-      // Brief delay so the final output renders once before removal.
-      // Much shorter than the old 500ms — just enough for one frame.
       setTimeout(() => removePane(pane), 50);
     }
   };
@@ -191,7 +215,11 @@ function handleStdin(data: Buffer) {
   if (!focused || focused.handle.exited) return;
 
   const wasPrefixed = isPrefixPending();
-  const actions = processInput(data, (s) => focused.handle.write(s));
+  expectingFocusedEcho = false;
+  const actions = processInput(data, (s) => {
+    focused.handle.write(s);
+    expectingFocusedEcho = true;
+  });
 
   if (isPrefixPending() !== wasPrefixed) {
     prevBuffer = null;
@@ -452,7 +480,9 @@ async function main() {
       pane = createLocalPane(spec.command, spec.args);
     }
     pane.handle.onActivity = () => {
-      scheduleRender();
+      const urgent = panes[focusedIndex] === pane && expectingFocusedEcho;
+      if (urgent) expectingFocusedEcho = false;
+      scheduleRender(urgent);
       if (pane.handle.exited) {
         setTimeout(() => removePane(pane), 50);
       }
