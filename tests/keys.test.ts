@@ -205,11 +205,32 @@ describe("SGR mouse events", () => {
     expect(write).not.toHaveBeenCalled();
   });
 
-  it("left click release is ignored", () => {
+  it("left click release produces mouseUp action", () => {
     const write = vi.fn();
     const actions = processInput(Buffer.from("\x1b[<0;15;10m"), write);
-    expect(actions).toEqual([]);
+    expect(actions).toEqual([{ type: "mouseUp", row: 10, col: 15 }]);
     expect(write).not.toHaveBeenCalled();
+  });
+
+  it("left button drag produces mouseDrag action", () => {
+    const write = vi.fn();
+    // Button 32 = left button (0) + motion flag (32)
+    const actions = processInput(Buffer.from("\x1b[<32;20;8M"), write);
+    expect(actions).toEqual([{ type: "mouseDrag", row: 8, col: 20 }]);
+  });
+
+  it("drag + release sequence produces both actions", () => {
+    const write = vi.fn();
+    const actions = processInput(
+      Buffer.from("\x1b[<0;5;3M\x1b[<32;10;3M\x1b[<32;15;3M\x1b[<0;15;3m"),
+      write,
+    );
+    expect(actions).toEqual([
+      { type: "mouseDown", row: 3, col: 5 },
+      { type: "mouseDrag", row: 3, col: 10 },
+      { type: "mouseDrag", row: 3, col: 15 },
+      { type: "mouseUp", row: 3, col: 15 },
+    ]);
   });
 
   it("scroll up produces scrollUp action", () => {

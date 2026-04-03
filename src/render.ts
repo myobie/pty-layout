@@ -13,6 +13,7 @@ import {
 } from "@myobie/pty/tui";
 import type { PaneRect, LayoutMode } from "./layout.ts";
 import type { Pane } from "./pane.ts";
+import { type SelectionState, isSelected, hasDragDistance } from "./selection.ts";
 
 type Cell = ReturnType<Pane["handle"]["readCells"]>[0][0];
 
@@ -45,6 +46,7 @@ export function renderFrame(
   prevBuffer: CellBuffer | null,
   prefixActive: boolean,
   scrollOffsets: number[] = [],
+  selection?: SelectionState | null,
 ): { output: string; buffer: CellBuffer } {
   const buf = new CellBuffer(totalRows, totalCols);
 
@@ -109,13 +111,24 @@ export function renderFrame(
         });
       }
 
-      // Blit PTY cells into the buffer
+      // Blit PTY cells into the buffer, applying selection highlight
+      const showSelection = selection
+        && selection.paneIndex === paneIndex
+        && hasDragDistance(selection);
+
       for (let r = 0; r < cells.length && r < rect.innerHeight; r++) {
         const row = cells[r];
         if (!row) continue;
         for (let c = 0; c < row.length && c < rect.innerWidth; c++) {
           const cell = row[c];
-          if (cell) {
+          if (!cell) continue;
+          if (showSelection && isSelected(r, c, selection!)) {
+            buf.setCell(rect.innerRow - 1 + r, rect.innerCol - 1 + c, {
+              ...cell,
+              fg: cell.bg ?? [0, 0, 0],
+              bg: cell.fg ?? [200, 200, 200],
+            });
+          } else {
             buf.setCell(rect.innerRow - 1 + r, rect.innerCol - 1 + c, cell);
           }
         }

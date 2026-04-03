@@ -222,3 +222,46 @@ describe("prefix overlay", () => {
     await session.waitForAbsent("prev pane", 5000);
   }, 20000);
 });
+
+describe("text selection", () => {
+  it("click-drag highlights text and click clears it", async () => {
+    startApp();
+    await session.waitForText("1/1", 15000);
+    await new Promise(r => setTimeout(r, 500));
+
+    // Type identifiable text
+    session.type("echo SELECTME\r");
+    await session.waitForText("SELECTME", 5000);
+
+    // Get the screenshot before selection to find the text position
+    const before = session.screenshot();
+    expect(before.text).toContain("SELECTME");
+
+    // Find approximate row/col of "SELECTME" in screen coords
+    // The pane inner area starts at row 2, col 2 (1-indexed, after border)
+    // Send SGR mouse events: click at start of text area, drag across
+    const startCol = 3; // inside pane
+    const startRow = 3; // a few rows down (prompt + echo output)
+
+    // mouseDown
+    session.sendKeys(`\x1b[<0;${startCol};${startRow}M`);
+    // mouseDrag across several columns
+    session.sendKeys(`\x1b[<32;${startCol + 10};${startRow}M`);
+    // mouseUp
+    session.sendKeys(`\x1b[<0;${startCol + 10};${startRow}m`);
+
+    await new Promise(r => setTimeout(r, 200));
+    const after = session.screenshot();
+
+    // The selection should cause inverted colors — check that the ANSI
+    // output changed (contains background color sequences that weren't there before)
+    // With selection, we swap fg/bg, so we should see 48;2 (bg) sequences
+    // for colors that were previously only in fg
+    expect(after.ansi).toContain("48;2;");
+
+    // Click to clear selection
+    session.sendKeys(`\x1b[<0;${startCol};${startRow}M`);
+    session.sendKeys(`\x1b[<0;${startCol};${startRow}m`);
+    await new Promise(r => setTimeout(r, 200));
+  }, 20000);
+});

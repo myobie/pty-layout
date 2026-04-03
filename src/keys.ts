@@ -9,6 +9,8 @@ export interface Action {
     | "closePane"
     | "detach"
     | "mouseDown"
+    | "mouseDrag"
+    | "mouseUp"
     | "scrollUp"
     | "scrollDown";
   index?: number;
@@ -125,6 +127,7 @@ export function processInput(
         if (prefixPending) prefixPending = false;
 
         const isScroll = !!(mouse.button & 64);
+        const isMotion = !!(mouse.button & 32);
         const baseButton = mouse.button & 3;
 
         if (isScroll) {
@@ -133,8 +136,12 @@ export function processInput(
             row: mouse.row,
             col: mouse.col,
           });
-        } else if (mouse.press && baseButton === 0) {
+        } else if (isMotion && baseButton === 0 && mouse.press) {
+          actions.push({ type: "mouseDrag", row: mouse.row, col: mouse.col });
+        } else if (!isMotion && baseButton === 0 && mouse.press) {
           actions.push({ type: "mouseDown", row: mouse.row, col: mouse.col });
+        } else if (!isMotion && baseButton === 0 && !mouse.press) {
+          actions.push({ type: "mouseUp", row: mouse.row, col: mouse.col });
         }
 
         i += mouse.length;

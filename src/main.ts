@@ -3,12 +3,20 @@ import { calculateLayout, nextLayoutMode, type LayoutMode, type PaneRect } from 
 import { createSessionPane, createAttachPane, createLocalPane, closePane, defaultShell, type Pane } from "./pane.ts";
 import { renderFrame, clearCellCache } from "./render.ts";
 import { processInput, isPrefixPending } from "./keys.ts";
+import {
+  type SelectionState,
+  hasDragDistance,
+  extractSelectedText,
+  copyToClipboard,
+  screenToPaneLocal,
+  clampToInner,
+} from "./selection.ts";
 import { CellBuffer } from "@myobie/pty/tui";
 
 const enterAltScreen = "\x1b[?1049h";
 const leaveAltScreen = "\x1b[?1049l";
-const enableMouse = "\x1b[?1000h\x1b[?1006h"; // button tracking + SGR encoding
-const disableMouse = "\x1b[?1006l\x1b[?1000l";
+const enableMouse = "\x1b[?1002h\x1b[?1006h"; // button-motion tracking + SGR encoding
+const disableMouse = "\x1b[?1006l\x1b[?1002l";
 const STATUS_BAR_HEIGHT = 1;
 
 // --- State ---
@@ -21,6 +29,7 @@ let renderScheduled = false;
 let running = false;
 let lastLayout: { paneIndex: number; rect: PaneRect }[] = [];
 let scrollOffsets: number[] = []; // per-pane scroll offset (0 = live viewport)
+let selection: SelectionState | null = null;
 
 // --- Terminal helpers ---
 
@@ -74,6 +83,7 @@ function doRender() {
     prevBuffer,
     isPrefixPending(),
     scrollOffsets,
+    selection,
   );
 
   process.stdout.write(output);
@@ -236,12 +246,124 @@ function handleStdin(data: Buffer) {
         break;
 
       case "mouseDown": {
-        const idx = findPaneAtPosition(action.row!, action.col!);
-        if (idx !== -1 && idx !== focusedIndex) {
-          focusedIndex = idx;
+        // Clear any completed selection
+        if (selection && !selection.active) {
+          selection = null;
           prevBuffer = null;
-          scheduleRender();
         }
+
+        const clickIdx = findPaneAtPosition(action.row!, action.col!);
+        if (clickIdx === -1) break;
+        const clickPane = panes[clickIdx]!;
+
+        // Focus the pane
+        if (clickIdx !== focusedIndex) {
+          focusedIndex = clickIdx;
+          prevBuffer = null;
+        }
+
+        if (clickPane.handle.mouseMode) {
+          // Forward to mouse-mode pane
+          const clickEntry = lastLayout.find(l => l.paneIndex === clickIdx);
+          if (clickEntry) {
+            const cr = clickEntry.rect;
+            const relCol = action.col! - cr.innerCol + 1;
+            const relRow = action.row! - cr.innerRow + 1;
+            if (relCol >= 1 && relCol <= cr.innerWidth && relRow >= 1 && relRow <= cr.innerHeight) {
+              clickPane.handle.write(`\x1b[<0;${relCol};${relRow}M`);
+            }
+          }
+        } else {
+          // Start selection
+          const clickEntry = lastLayout.find(l => l.paneIndex === clickIdx);
+          if (clickEntry) {
+            const local = screenToPaneLocal(action.row!, action.col!, clickEntry.rect);
+            const clamped = clampToInner(local.row, local.col, clickEntry.rect);
+            selection = {
+              paneId: clickPane.id,
+              paneIndex: clickIdx,
+              scrollOffset: scrollOffsets[clickIdx] ?? 0,
+              startRow: clamped.row,
+              startCol: clamped.col,
+              endRow: clamped.row,
+              endCol: clamped.col,
+              active: true,
+            };
+          }
+        }
+        scheduleRender();
+        break;
+      }
+
+      case "mouseDrag": {
+        if (!selection || !selection.active) break;
+        const dragPane = panes[selection.paneIndex];
+        if (!dragPane) break;
+
+        if (dragPane.handle.mouseMode) {
+          // Forward drag to mouse-mode pane
+          const dragEntry = lastLayout.find(l => l.paneIndex === selection!.paneIndex);
+          if (dragEntry) {
+            const dr = dragEntry.rect;
+            const relCol = action.col! - dr.innerCol + 1;
+            const relRow = action.row! - dr.innerRow + 1;
+            if (relCol >= 1 && relCol <= dr.innerWidth && relRow >= 1 && relRow <= dr.innerHeight) {
+              dragPane.handle.write(`\x1b[<32;${relCol};${relRow}M`);
+            }
+          }
+          selection = null;
+          break;
+        }
+
+        const dragEntry = lastLayout.find(l => l.paneIndex === selection!.paneIndex);
+        if (dragEntry) {
+          const local = screenToPaneLocal(action.row!, action.col!, dragEntry.rect);
+          const clamped = clampToInner(local.row, local.col, dragEntry.rect);
+          selection.endRow = clamped.row;
+          selection.endCol = clamped.col;
+          if (hasDragDistance(selection)) {
+            prevBuffer = null;
+            scheduleRender();
+          }
+        }
+        break;
+      }
+
+      case "mouseUp": {
+        if (!selection) break;
+        const upPane = panes[selection.paneIndex];
+
+        if (upPane?.handle.mouseMode) {
+          // Forward release to mouse-mode pane
+          const upEntry = lastLayout.find(l => l.paneIndex === selection!.paneIndex);
+          if (upEntry) {
+            const ur = upEntry.rect;
+            const relCol = action.col! - ur.innerCol + 1;
+            const relRow = action.row! - ur.innerRow + 1;
+            if (relCol >= 1 && relCol <= ur.innerWidth && relRow >= 1 && relRow <= ur.innerHeight) {
+              upPane.handle.write(`\x1b[<0;${relCol};${relRow}m`);
+            }
+          }
+          selection = null;
+          break;
+        }
+
+        selection.active = false;
+
+        if (hasDragDistance(selection) && upPane) {
+          // Copy selected text to clipboard via OSC 52
+          const cells = upPane.handle.readCells(selection.scrollOffset);
+          const text = extractSelectedText(cells, selection);
+          if (text.length > 0) {
+            process.stdout.write(copyToClipboard(text));
+          }
+          // Keep selection visible (highlight stays until next click)
+        } else {
+          // Just a click, no drag — clear selection
+          selection = null;
+        }
+        prevBuffer = null;
+        scheduleRender();
         break;
       }
 
@@ -250,6 +372,11 @@ function handleStdin(data: Buffer) {
         const scrollIdx = findPaneAtPosition(action.row!, action.col!);
         if (scrollIdx === -1) break;
         const scrollPane = panes[scrollIdx]!;
+
+        // Clear selection when scrolling the selected pane
+        if (selection && selection.paneIndex === scrollIdx) {
+          selection = null;
+        }
 
         if (scrollPane.handle.mouseMode) {
           // Child wants mouse events — forward translated SGR sequence
