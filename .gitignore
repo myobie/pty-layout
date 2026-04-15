@@ -1,1 +1,3 @@
 node_modules/
+pty.toml
+.claude-session-id

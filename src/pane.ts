@@ -18,12 +18,13 @@ let nextId = 1;
 export async function createSessionPane(
   command: string,
   args: string[],
+  tags?: Record<string, string>,
 ): Promise<Pane> {
   const basename = command.split("/").pop() ?? command;
   const name = `layout-${basename}-${Date.now()}`;
   const displayCommand = args.length > 0 ? `${command} ${args.join(" ")}` : command;
 
-  await spawnDaemon(name, command, args, displayCommand);
+  await spawnDaemon({ name, command, args, displayCommand, tags });
   const handle = await attachPty(name, { cols: 80, rows: 24 });
 
   return {

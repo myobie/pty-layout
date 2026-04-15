@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import * as path from "node:path";
 import { Session } from "@myobie/pty/testing";
+import { spawnDaemon } from "@myobie/pty/client";
 
 const mainScript = path.resolve(import.meta.dirname, "../src/main.ts");
 
@@ -220,6 +221,61 @@ describe("prefix overlay", () => {
 
     session.sendKeys("\x1b");
     await session.waitForAbsent("prev pane", 5000);
+  }, 20000);
+});
+
+describe("tag subscription mode", () => {
+  it("shows empty state when no matching sessions exist", async () => {
+    startApp(["--tag", "project=test-empty"]);
+    await session.waitForText("Watching for sessions tagged", 15000);
+    const ss = session.screenshot();
+    expect(ss.text).toContain("project=test-empty");
+  }, 20000);
+
+  it("discovers an existing tagged session on startup", async () => {
+    const name = `tag-test-${Date.now()}`;
+    await spawnDaemon({ name, command: "bash", args: [], displayCommand: "bash", tags: { project: "tag-disco" } });
+    await new Promise(r => setTimeout(r, 500)); // wait for socket to be ready
+
+    startApp(["--tag", "project=tag-disco"]);
+    await session.waitForText(name, 15000);
+    const ss = session.screenshot();
+    expect(ss.text).toContain(name);
+  }, 20000);
+
+  it("combines --tag with explicit pane specs", async () => {
+    startApp(["--tag", "project=tag-combo", "bash"]);
+    // Should show the bash pane immediately (from the explicit spec)
+    await session.waitForText("1/1", 15000);
+    // And be watching for tagged sessions (won't exit when bash exits)
+  }, 20000);
+});
+
+describe("hidden panes", () => {
+  it("hide pane with ^]h and unhide with ^]H then number", async () => {
+    startApp(["bash", "bash"]);
+    await session.waitForText("1/2", 15000);
+
+    // Hide the focused pane
+    prefixKey("h");
+    await session.waitForText("1/1", 5000);
+
+    // Show hidden panes picker
+    session.sendKeys("\x1d"); // Ctrl+]
+    session.sendKeys("H");   // show hidden list (sticky)
+    await session.waitForText("Hidden Panes", 5000);
+
+    // Press 1 to unhide the first hidden pane
+    session.sendKeys("1");
+    await session.waitForText("2/2", 5000);
+  }, 20000);
+
+  it("shows message when all panes are hidden", async () => {
+    startApp(["bash"]);
+    await session.waitForText("1/1", 15000);
+
+    prefixKey("h");
+    await session.waitForText("All panes hidden", 5000);
   }, 20000);
 });
 

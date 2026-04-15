@@ -47,6 +47,7 @@ export function renderFrame(
   prefixActive: boolean,
   scrollOffsets: number[] = [],
   selection?: SelectionState | null,
+  hiddenPicker?: { panes: Pane[] } | null,
 ): { output: string; buffer: CellBuffer } {
   const buf = new CellBuffer(totalRows, totalCols);
 
@@ -149,8 +150,12 @@ export function renderFrame(
 
   // Prefix key overlay
   if (prefixActive) {
-    renderPaneBadges(buf, visible);
-    renderPrefixOverlay(buf, totalRows, totalCols);
+    if (hiddenPicker && hiddenPicker.panes.length > 0) {
+      renderHiddenPicker(buf, hiddenPicker.panes, totalRows, totalCols);
+    } else {
+      renderPaneBadges(buf, visible);
+      renderPrefixOverlay(buf, totalRows, totalCols);
+    }
   }
 
   // Diff against previous buffer
@@ -252,7 +257,8 @@ function renderPrefixOverlay(
     [",", "prev pane ", ".", "next pane "],
     ["1-9", "jump to # ", "l", "layout    "],
     ["n", "new shell ", "p", "new pty   "],
-    ["w", "close pane", "Esc", "cancel    "],
+    ["w", "close pane", "h", "hide pane "],
+    ["H", "hidden list", "Esc", "cancel    "],
   ];
 
   const colWidth = 17;
@@ -288,6 +294,57 @@ function renderPrefixOverlay(
         desc.padEnd(colWidth - 5);
     }
   }
+
+  ansi += reset();
+  buf.writeAnsi(ansi);
+}
+
+function renderHiddenPicker(
+  buf: CellBuffer,
+  hiddenPanes: Pane[],
+  totalRows: number,
+  totalCols: number,
+): void {
+  const maxItems = Math.min(hiddenPanes.length, 9);
+  const contentWidth = 36;
+  const boxWidth = contentWidth + 2;
+  const boxHeight = maxItems + 3; // items + title border + footer + bottom border
+
+  if (totalRows < boxHeight + 2 || totalCols < boxWidth + 2) return;
+
+  const startRow = Math.floor((totalRows - boxHeight) / 2) + 1;
+  const startCol = Math.floor((totalCols - boxWidth) / 2) + 1;
+
+  let ansi =
+    bg(OVERLAY_BG[0], OVERLAY_BG[1], OVERLAY_BG[2]) +
+    fg(OVERLAY_KEY[0], OVERLAY_KEY[1], OVERLAY_KEY[2]) +
+    drawBox(startRow, startCol, boxWidth, boxHeight, {
+      style: "rounded",
+      title: " Hidden Panes ",
+      fill: true,
+    });
+
+  for (let i = 0; i < maxItems; i++) {
+    const pane = hiddenPanes[i]!;
+    const num = String(i + 1);
+    const title = pane.title.length > contentWidth - 5
+      ? pane.title.slice(0, contentWidth - 8) + "..."
+      : pane.title;
+    ansi +=
+      moveTo(startRow + 1 + i, startCol + 1) +
+      bg(OVERLAY_BG[0], OVERLAY_BG[1], OVERLAY_BG[2]) +
+      fg(OVERLAY_KEY[0], OVERLAY_KEY[1], OVERLAY_KEY[2]) +
+      (" " + num).padEnd(4) +
+      fg(OVERLAY_FG[0], OVERLAY_FG[1], OVERLAY_FG[2]) +
+      title.padEnd(contentWidth - 4);
+  }
+
+  // Footer
+  ansi +=
+    moveTo(startRow + maxItems + 1, startCol + 1) +
+    bg(OVERLAY_BG[0], OVERLAY_BG[1], OVERLAY_BG[2]) +
+    fg(100, 100, 100) +
+    "Press number to unhide, Esc cancel".padEnd(contentWidth);
 
   ansi += reset();
   buf.writeAnsi(ansi);

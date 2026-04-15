@@ -12,7 +12,13 @@ import {
   screenToPaneLocal,
   clampToInner,
 } from "./selection.ts";
-import { CellBuffer } from "@myobie/pty/tui";
+import { CellBuffer, fullRender, moveTo, fg, bg, visibleLength, RESET } from "@myobie/pty/tui";
+import {
+  type TagFilter,
+  TagSubscription,
+  parseTagFilter,
+  formatTagFilters,
+} from "./tag-subscription.ts";
 
 const enterAltScreen = "\x1b[?1049h";
 const leaveAltScreen = "\x1b[?1049l";
@@ -32,6 +38,11 @@ let running = false;
 let lastLayout: { paneIndex: number; rect: PaneRect }[] = [];
 let scrollOffsets: number[] = []; // per-pane scroll offset (0 = live viewport)
 let selection: SelectionState | null = null;
+let tagSubscription: TagSubscription | null = null;
+let tagFilters: TagFilter[] = [];
+let tagMode = false;
+let hiddenPanes: Pane[] = [];
+let showingHiddenPicker = false;
 
 // --- Terminal helpers ---
 
@@ -76,7 +87,15 @@ function scheduleRender(urgent = false) {
 }
 
 function doRender() {
-  if (!running || panes.length === 0) return;
+  if (!running) return;
+
+  if (panes.length === 0) {
+    if (tagMode || hiddenPanes.length > 0) {
+      const [totalRows, totalCols] = getSize();
+      renderEmptyTagState(totalRows, totalCols);
+    }
+    return;
+  }
 
   const [totalRows, totalCols] = getSize();
   if (totalRows < 4 || totalCols < 4) return;
@@ -108,6 +127,7 @@ function doRender() {
     isPrefixPending(),
     scrollOffsets,
     selection,
+    showingHiddenPicker ? { panes: hiddenPanes } : null,
   );
 
   process.stdout.write(output);
@@ -141,8 +161,13 @@ function removePane(pane: Pane) {
   scrollOffsets.splice(idx, 1);
 
   if (panes.length === 0) {
-    detach();
-    process.exit(0);
+    if (!tagMode && hiddenPanes.length === 0) {
+      detach();
+      process.exit(0);
+      return;
+    }
+    prevBuffer = null;
+    scheduleRender();
     return;
   }
 
@@ -158,20 +183,67 @@ function removePane(pane: Pane) {
 function removeFocusedPane() {
   if (panes.length === 0) return;
   const pane = panes[focusedIndex];
+
   clearCellCache(pane.id);
   closePane(pane);
   panes.splice(focusedIndex, 1);
   scrollOffsets.splice(focusedIndex, 1);
 
   if (panes.length === 0) {
-    detach();
-    process.exit(0);
+    if (!tagMode && hiddenPanes.length === 0) {
+      detach();
+      process.exit(0);
+      return;
+    }
+    prevBuffer = null;
+    scheduleRender();
     return;
   }
 
   focusedIndex = Math.min(focusedIndex, panes.length - 1);
   prevBuffer = null;
   scheduleRender();
+}
+
+function hideCurrentPane() {
+  if (panes.length === 0) return;
+  const pane = panes[focusedIndex];
+
+  clearCellCache(pane.id);
+  panes.splice(focusedIndex, 1);
+  scrollOffsets.splice(focusedIndex, 1);
+  hiddenPanes.push(pane);
+
+  // Set up activity handler to clean up when hidden pane exits
+  pane.handle.onActivity = () => {
+    if (pane.handle.exited) {
+      const hi = hiddenPanes.indexOf(pane);
+      if (hi !== -1) {
+        hiddenPanes.splice(hi, 1);
+        closePane(pane);
+      }
+    }
+  };
+
+  // Tell tag subscription this session is hidden
+  if (tagSubscription && pane.source.type === "session") {
+    tagSubscription.untrack(pane.source.name);
+  }
+
+  if (panes.length > 0) {
+    focusedIndex = Math.min(focusedIndex, panes.length - 1);
+  } else {
+    focusedIndex = 0;
+  }
+  prevBuffer = null;
+  scheduleRender();
+}
+
+function unhidePane(hiddenIndex: number) {
+  if (hiddenIndex < 0 || hiddenIndex >= hiddenPanes.length) return;
+  const pane = hiddenPanes.splice(hiddenIndex, 1)[0]!;
+  addPane(pane);
+  showingHiddenPicker = false;
 }
 
 // --- Mouse hit-testing ---
@@ -195,12 +267,17 @@ function findPaneAtPosition(row: number, col: number): number {
 function detach() {
   if (!running) return;
   running = false;
+  tagSubscription?.stop();
   // Detach: release handles but don't kill processes.
   // For attached sessions, handle.kill() sends detach (not terminate).
   // For local createPty processes, they'll be cleaned up when our process exits.
   for (const pane of panes) {
     pane.handle.kill();
   }
+  for (const pane of hiddenPanes) {
+    pane.handle.kill();
+  }
+  hiddenPanes.length = 0;
   process.stdout.write(disableMouse + showCursor() + reset() + leaveAltScreen);
   if (process.stdin.isTTY) {
     process.stdin.setRawMode(false);
@@ -235,6 +312,11 @@ function handleStdin(data: Buffer) {
         break;
 
       case "focusIndex":
+        if (showingHiddenPicker) {
+          // In hidden picker mode, number keys unhide
+          unhidePane(action.index!);
+          break;
+        }
         if (action.index! >= 0 && action.index! < panes.length) {
           focusedIndex = action.index!;
           prevBuffer = null;
@@ -258,19 +340,41 @@ function handleStdin(data: Buffer) {
         }
         break;
 
-      case "newShell":
-        createSessionPane(defaultShell(), []).then(addPane).catch(() => {
-          // If daemon spawn fails, fall back to local process
+      case "newShell": {
+        const newShellTags = tagMode
+          ? Object.fromEntries(tagFilters.filter(f => f.value !== undefined).map(f => [f.key, f.value!]))
+          : undefined;
+        createSessionPane(defaultShell(), [], newShellTags).then((pane) => {
+          if (tagSubscription) tagSubscription.track(pane.source.type === "session" ? pane.source.name : "");
+          addPane(pane);
+        }).catch(() => {
           addPane(createLocalPane(defaultShell(), []));
         });
         break;
+      }
 
       case "newPty":
         addPane(createLocalPane("pty", []));
         break;
 
       case "closePane":
-        removeFocusedPane();
+        if (tagMode) {
+          hideCurrentPane();
+        } else {
+          removeFocusedPane();
+        }
+        break;
+
+      case "hidePane":
+        hideCurrentPane();
+        break;
+
+      case "showHiddenList":
+        if (hiddenPanes.length > 0) {
+          showingHiddenPicker = true;
+          prevBuffer = null;
+          scheduleRender();
+        }
         break;
 
       case "mouseDown": {
@@ -439,6 +543,13 @@ function handleStdin(data: Buffer) {
         break;
     }
   }
+
+  // Close hidden picker when prefix exits (Esc or unrecognized key)
+  if (showingHiddenPicker && !isPrefixPending()) {
+    showingHiddenPicker = false;
+    prevBuffer = null;
+    scheduleRender();
+  }
 }
 
 // --- CLI arg parsing ---
@@ -447,32 +558,85 @@ type PaneSpec =
   | { type: "local"; command: string; args: string[] }
   | { type: "attach"; name: string };
 
-function parseArgs(argv: string[]): PaneSpec[] {
-  const specs: PaneSpec[] = [];
+interface ParsedArgs {
+  specs: PaneSpec[];
+  tagFilters: TagFilter[];
+}
 
-  for (const arg of argv) {
-    if (arg.startsWith("@")) {
-      specs.push({ type: "attach", name: arg.slice(1) });
+function parseArgs(argv: string[]): ParsedArgs {
+  const specs: PaneSpec[] = [];
+  const filters: TagFilter[] = [];
+
+  let i = 0;
+  while (i < argv.length) {
+    if (argv[i] === "--tag" && i + 1 < argv.length) {
+      filters.push(parseTagFilter(argv[i + 1]!));
+      i += 2;
     } else {
-      const parts = arg.split(/\s+/);
-      specs.push({ type: "local", command: parts[0]!, args: parts.slice(1) });
+      const arg = argv[i]!;
+      if (arg.startsWith("@")) {
+        specs.push({ type: "attach", name: arg.slice(1) });
+      } else {
+        const parts = arg.split(/\s+/);
+        specs.push({ type: "local", command: parts[0]!, args: parts.slice(1) });
+      }
+      i++;
     }
   }
 
-  if (specs.length === 0) {
+  if (specs.length === 0 && filters.length === 0) {
     specs.push({ type: "local", command: defaultShell(), args: [] });
   }
 
-  return specs;
+  return { specs, tagFilters: filters };
+}
+
+// --- Empty tag state ---
+
+function renderEmptyTagState(totalRows: number, totalCols: number): void {
+  const buf = new CellBuffer(totalRows, totalCols);
+  let label: string;
+  if (hiddenPanes.length > 0) {
+    label = `All panes hidden (${hiddenPanes.length}). ^] H to show hidden panes.`;
+  } else {
+    label = `Watching for sessions tagged ${formatTagFilters(tagFilters)}...`;
+  }
+  const row = Math.floor(totalRows / 2);
+  const col = Math.max(1, Math.floor((totalCols - visibleLength(label)) / 2) + 1);
+  const ansi =
+    moveTo(row, col) +
+    fg(100, 100, 100) +
+    label +
+    RESET;
+  buf.writeAnsi(ansi);
+
+  // Status bar
+  const left = " ^] command key | ^\\ detach";
+  const right = ` 0/0 grid `;
+  const leftLen = visibleLength(left);
+  const rightLen = visibleLength(right);
+  const pad = Math.max(totalCols - leftLen - rightLen, 0);
+  const statusText = left + " ".repeat(pad) + right;
+  const statusAnsi =
+    moveTo(totalRows, 1) +
+    bg(40, 40, 40) +
+    fg(180, 180, 180) +
+    statusText.slice(0, totalCols) +
+    RESET;
+  buf.writeAnsi(statusAnsi);
+
+  process.stdout.write(fullRender(buf));
 }
 
 // --- Main ---
 
 async function main() {
-  const specs = parseArgs(process.argv.slice(2));
+  const parsed = parseArgs(process.argv.slice(2));
+  tagFilters = parsed.tagFilters;
+  tagMode = tagFilters.length > 0;
 
-  // Create initial panes
-  for (const spec of specs) {
+  // Create initial panes from explicit specs
+  for (const spec of parsed.specs) {
     let pane: Pane;
     if (spec.type === "attach") {
       pane = await createAttachPane(spec.name);
@@ -516,6 +680,39 @@ async function main() {
     process.exit(0);
   });
   process.on("exit", detach);
+
+  // Start tag subscription if in tag mode
+  if (tagMode) {
+    tagSubscription = new TagSubscription(tagFilters, {
+      onAdd: async (sessionName) => {
+        try {
+          const pane = await createAttachPane(sessionName);
+          addPane(pane);
+        } catch {
+          // Session may have disappeared between event and attach
+        }
+      },
+      onRemove: (sessionName) => {
+        const pane = panes.find(
+          (p) => p.source.type === "session" && p.source.name === sessionName,
+        );
+        if (pane) removePane(pane);
+      },
+    });
+
+    tagSubscription.isHidden = (name) =>
+      hiddenPanes.some((p) => p.source.type === "session" && p.source.name === name);
+
+    const initialSessions = await tagSubscription.start();
+    for (const name of initialSessions) {
+      try {
+        const pane = await createAttachPane(name);
+        addPane(pane);
+      } catch {
+        // Session may have disappeared
+      }
+    }
+  }
 
   // Initial render
   scheduleRender();
