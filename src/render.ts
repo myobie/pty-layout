@@ -14,6 +14,7 @@ import {
 import type { PaneRect, LayoutMode } from "./layout.ts";
 import type { Pane } from "./pane.ts";
 import { type SelectionState, isSelected, hasDragDistance } from "./selection.ts";
+import type { PickerState } from "./session-picker.ts";
 
 type Cell = ReturnType<Pane["handle"]["readCells"]>[0][0];
 
@@ -47,7 +48,7 @@ export function renderFrame(
   prefixActive: boolean,
   scrollOffsets: number[] = [],
   selection?: SelectionState | null,
-  hiddenPicker?: { panes: Pane[] } | null,
+  sessionPicker?: PickerState | null,
 ): { output: string; buffer: CellBuffer } {
   const buf = new CellBuffer(totalRows, totalCols);
 
@@ -148,14 +149,12 @@ export function renderFrame(
   // Status bar at bottom row
   renderStatusBar(buf, totalRows, totalCols, layoutMode, focusedIndex, panes.length);
 
-  // Prefix key overlay
-  if (prefixActive) {
-    if (hiddenPicker && hiddenPicker.panes.length > 0) {
-      renderHiddenPicker(buf, hiddenPicker.panes, totalRows, totalCols);
-    } else {
-      renderPaneBadges(buf, visible);
-      renderPrefixOverlay(buf, totalRows, totalCols);
-    }
+  // Overlays
+  if (sessionPicker) {
+    renderSessionPicker(buf, sessionPicker, totalRows, totalCols);
+  } else if (prefixActive) {
+    renderPaneBadges(buf, visible);
+    renderPrefixOverlay(buf, totalRows, totalCols);
   }
 
   // Diff against previous buffer
@@ -256,9 +255,8 @@ function renderPrefixOverlay(
   const lines = [
     [",", "prev pane ", ".", "next pane "],
     ["1-9", "jump to # ", "l", "layout    "],
-    ["n", "new shell ", "p", "new pty   "],
-    ["w", "close pane", "h", "hide pane "],
-    ["H", "hidden list", "Esc", "cancel    "],
+    ["n", "sessions  ", "w", "close pane"],
+    ["Esc", "cancel    ", "", "          "],
   ];
 
   const colWidth = 17;
@@ -299,52 +297,105 @@ function renderPrefixOverlay(
   buf.writeAnsi(ansi);
 }
 
-function renderHiddenPicker(
+export function renderSessionPicker(
   buf: CellBuffer,
-  hiddenPanes: Pane[],
+  state: PickerState,
   totalRows: number,
   totalCols: number,
 ): void {
-  const maxItems = Math.min(hiddenPanes.length, 9);
-  const contentWidth = 36;
+  const contentWidth = Math.min(58, totalCols - 4);
+  const maxVisibleItems = Math.min(15, totalRows - 8);
+
+  // Count lines needed: group headers + items
+  let lineCount = 0;
+  for (const group of state.groups) {
+    lineCount += 1; // header
+    lineCount += group.items.length;
+  }
+  lineCount = Math.min(lineCount, maxVisibleItems);
+  if (lineCount === 0) lineCount = 1; // at least one line for "Loading..."
+
+  const hasFilter = state.filter.length > 0;
+  const boxHeight = lineCount + (hasFilter ? 4 : 3); // borders + optional filter + footer
   const boxWidth = contentWidth + 2;
-  const boxHeight = maxItems + 3; // items + title border + footer + bottom border
 
   if (totalRows < boxHeight + 2 || totalCols < boxWidth + 2) return;
 
   const startRow = Math.floor((totalRows - boxHeight) / 2) + 1;
   const startCol = Math.floor((totalCols - boxWidth) / 2) + 1;
 
+  const title = state.loading ? " Sessions (loading...) " : " Sessions ";
+
   let ansi =
     bg(OVERLAY_BG[0], OVERLAY_BG[1], OVERLAY_BG[2]) +
     fg(OVERLAY_KEY[0], OVERLAY_KEY[1], OVERLAY_KEY[2]) +
     drawBox(startRow, startCol, boxWidth, boxHeight, {
       style: "rounded",
-      title: " Hidden Panes ",
+      title,
       fill: true,
     });
 
-  for (let i = 0; i < maxItems; i++) {
-    const pane = hiddenPanes[i]!;
-    const num = String(i + 1);
-    const title = pane.title.length > contentWidth - 5
-      ? pane.title.slice(0, contentWidth - 8) + "..."
-      : pane.title;
+  let row = startRow + 1;
+
+  // Filter bar
+  if (hasFilter) {
     ansi +=
-      moveTo(startRow + 1 + i, startCol + 1) +
+      moveTo(row, startCol + 1) +
+      bg(OVERLAY_BG[0], OVERLAY_BG[1], OVERLAY_BG[2]) +
+      fg(OVERLAY_FG[0], OVERLAY_FG[1], OVERLAY_FG[2]) +
+      (" Filter: " + state.filter).slice(0, contentWidth).padEnd(contentWidth);
+    row++;
+  }
+
+  // Grouped list
+  let itemIndex = 0;
+  let linesRendered = 0;
+
+  for (const group of state.groups) {
+    if (linesRendered >= maxVisibleItems) break;
+
+    // Group header
+    ansi +=
+      moveTo(row, startCol + 1) +
       bg(OVERLAY_BG[0], OVERLAY_BG[1], OVERLAY_BG[2]) +
       fg(OVERLAY_KEY[0], OVERLAY_KEY[1], OVERLAY_KEY[2]) +
-      (" " + num).padEnd(4) +
-      fg(OVERLAY_FG[0], OVERLAY_FG[1], OVERLAY_FG[2]) +
-      title.padEnd(contentWidth - 4);
+      (" " + group.title + " ").padEnd(contentWidth);
+    row++;
+    linesRendered++;
+
+    for (const item of group.items) {
+      if (linesRendered >= maxVisibleItems) break;
+
+      const isSel = itemIndex === state.selectedIndex;
+      const fgColor = isSel ? OVERLAY_KEY : OVERLAY_FG;
+      const prefix = isSel ? "▸ " : "  ";
+
+      let line: string;
+      if (item.type === "create-local" || item.type === "create-remote") {
+        line = prefix + item.label;
+      } else {
+        const dot = "● ";
+        const detail = item.detail ? "  " + item.detail : "";
+        line = prefix + dot + item.label + detail;
+      }
+
+      ansi +=
+        moveTo(row, startCol + 1) +
+        bg(OVERLAY_BG[0], OVERLAY_BG[1], OVERLAY_BG[2]) +
+        fg(fgColor[0], fgColor[1], fgColor[2]) +
+        line.slice(0, contentWidth).padEnd(contentWidth);
+      row++;
+      linesRendered++;
+      itemIndex++;
+    }
   }
 
   // Footer
   ansi +=
-    moveTo(startRow + maxItems + 1, startCol + 1) +
+    moveTo(startRow + boxHeight - 2, startCol + 1) +
     bg(OVERLAY_BG[0], OVERLAY_BG[1], OVERLAY_BG[2]) +
     fg(100, 100, 100) +
-    "Press number to unhide, Esc cancel".padEnd(contentWidth);
+    "↵ select  type to filter  Esc cancel".slice(0, contentWidth).padEnd(contentWidth);
 
   ansi += reset();
   buf.writeAnsi(ansi);

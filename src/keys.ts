@@ -5,10 +5,7 @@ export interface Action {
     | "focusPrev"
     | "focusNext"
     | "newShell"
-    | "newPty"
     | "closePane"
-    | "hidePane"
-    | "showHiddenList"
     | "detach"
     | "mouseDown"
     | "mouseDrag"
@@ -21,15 +18,12 @@ export interface Action {
 }
 
 // Keys that stay in prefix mode after executing (for repeated navigation)
-const STICKY_KEYS = new Set([",", ".", "H"]);
+const STICKY_KEYS = new Set([",", "."]);
 
 const COMMAND_MAP: Record<string, Action> = {
   l: { type: "cycleLayout" },
   n: { type: "newShell" },
-  p: { type: "newPty" },
   w: { type: "closePane" },
-  h: { type: "hidePane" },
-  H: { type: "showHiddenList" },
   ",": { type: "focusPrev" },
   ".": { type: "focusNext" },
   "1": { type: "focusIndex", index: 0 },

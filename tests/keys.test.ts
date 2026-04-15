@@ -120,13 +120,6 @@ describe("prefix sticky keys", () => {
     expect(isPrefixPending()).toBe(false);
   });
 
-  it("H stays in prefix mode (sticky)", () => {
-    const write = vi.fn();
-    const actions = processInput(Buffer.from("\x1dH"), write);
-    expect(actions).toEqual([{ type: "showHiddenList" }]);
-    expect(isPrefixPending()).toBe(true);
-  });
-
   it("cross-buffer sticky keys work", () => {
     const write = vi.fn();
     processInput(Buffer.from("\x1d"), write);
@@ -184,10 +177,7 @@ describe("prefix command map", () => {
   const commands: [string, string, number?][] = [
     ["l", "cycleLayout"],
     ["n", "newShell"],
-    ["p", "newPty"],
     ["w", "closePane"],
-    ["h", "hidePane"],
-    ["H", "showHiddenList"],
     [",", "focusPrev"],
     [".", "focusNext"],
     ["1", "focusIndex", 0],

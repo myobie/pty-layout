@@ -2,7 +2,7 @@
 import { hideCursor, showCursor, reset } from "@myobie/pty/tui";
 import { calculateLayout, nextLayoutMode, type LayoutMode, type PaneRect } from "./layout.ts";
 import { createSessionPane, createAttachPane, createLocalPane, closePane, defaultShell, type Pane } from "./pane.ts";
-import { renderFrame, clearCellCache } from "./render.ts";
+import { renderFrame, clearCellCache, renderSessionPicker } from "./render.ts";
 import { processInput, isPrefixPending } from "./keys.ts";
 import {
   type SelectionState,
@@ -12,7 +12,15 @@ import {
   screenToPaneLocal,
   clampToInner,
 } from "./selection.ts";
-import { CellBuffer, fullRender, moveTo, fg, bg, visibleLength, RESET } from "@myobie/pty/tui";
+import { CellBuffer, fullRender, moveTo, fg, bg, visibleLength, RESET, spawnDaemon } from "@myobie/pty/tui";
+import {
+  type PickerState,
+  createPickerState,
+  refreshPicker,
+  filterPicker,
+  moveSelection,
+  autoSessionName,
+} from "./session-picker.ts";
 import {
   type TagFilter,
   TagSubscription,
@@ -41,8 +49,8 @@ let selection: SelectionState | null = null;
 let tagSubscription: TagSubscription | null = null;
 let tagFilters: TagFilter[] = [];
 let tagMode = false;
-let hiddenPanes: Pane[] = [];
-let showingHiddenPicker = false;
+let showingSessionPicker = false;
+let pickerState: PickerState | null = null;
 
 // --- Terminal helpers ---
 
@@ -90,9 +98,9 @@ function doRender() {
   if (!running) return;
 
   if (panes.length === 0) {
-    if (tagMode || hiddenPanes.length > 0) {
+    if (showingSessionPicker || tagMode) {
       const [totalRows, totalCols] = getSize();
-      renderEmptyTagState(totalRows, totalCols);
+      renderEmptyState(totalRows, totalCols);
     }
     return;
   }
@@ -127,7 +135,7 @@ function doRender() {
     isPrefixPending(),
     scrollOffsets,
     selection,
-    showingHiddenPicker ? { panes: hiddenPanes } : null,
+    showingSessionPicker ? pickerState : null,
   );
 
   process.stdout.write(output);
@@ -161,7 +169,7 @@ function removePane(pane: Pane) {
   scrollOffsets.splice(idx, 1);
 
   if (panes.length === 0) {
-    if (!tagMode && hiddenPanes.length === 0) {
+    if (!tagMode && !showingSessionPicker) {
       detach();
       process.exit(0);
       return;
@@ -190,7 +198,7 @@ function removeFocusedPane() {
   scrollOffsets.splice(focusedIndex, 1);
 
   if (panes.length === 0) {
-    if (!tagMode && hiddenPanes.length === 0) {
+    if (!tagMode && !showingSessionPicker) {
       detach();
       process.exit(0);
       return;
@@ -203,47 +211,6 @@ function removeFocusedPane() {
   focusedIndex = Math.min(focusedIndex, panes.length - 1);
   prevBuffer = null;
   scheduleRender();
-}
-
-function hideCurrentPane() {
-  if (panes.length === 0) return;
-  const pane = panes[focusedIndex];
-
-  clearCellCache(pane.id);
-  panes.splice(focusedIndex, 1);
-  scrollOffsets.splice(focusedIndex, 1);
-  hiddenPanes.push(pane);
-
-  // Set up activity handler to clean up when hidden pane exits
-  pane.handle.onActivity = () => {
-    if (pane.handle.exited) {
-      const hi = hiddenPanes.indexOf(pane);
-      if (hi !== -1) {
-        hiddenPanes.splice(hi, 1);
-        closePane(pane);
-      }
-    }
-  };
-
-  // Tell tag subscription this session is hidden
-  if (tagSubscription && pane.source.type === "session") {
-    tagSubscription.untrack(pane.source.name);
-  }
-
-  if (panes.length > 0) {
-    focusedIndex = Math.min(focusedIndex, panes.length - 1);
-  } else {
-    focusedIndex = 0;
-  }
-  prevBuffer = null;
-  scheduleRender();
-}
-
-function unhidePane(hiddenIndex: number) {
-  if (hiddenIndex < 0 || hiddenIndex >= hiddenPanes.length) return;
-  const pane = hiddenPanes.splice(hiddenIndex, 1)[0]!;
-  addPane(pane);
-  showingHiddenPicker = false;
 }
 
 // --- Mouse hit-testing ---
@@ -274,10 +241,6 @@ function detach() {
   for (const pane of panes) {
     pane.handle.kill();
   }
-  for (const pane of hiddenPanes) {
-    pane.handle.kill();
-  }
-  hiddenPanes.length = 0;
   process.stdout.write(disableMouse + showCursor() + reset() + leaveAltScreen);
   if (process.stdin.isTTY) {
     process.stdin.setRawMode(false);
@@ -287,7 +250,161 @@ function detach() {
 
 // --- Input handling ---
 
+function openSessionPicker() {
+  showingSessionPicker = true;
+  pickerState = createPickerState();
+  prevBuffer = null;
+  scheduleRender();
+
+  refreshPicker(tagFilters, (state) => {
+    if (showingSessionPicker) {
+      // Preserve current filter and selection if user already typed
+      if (pickerState && pickerState.filter.length > 0) {
+        pickerState = filterPicker({ ...state, allGroups: state.allGroups }, pickerState.filter);
+      } else {
+        pickerState = state;
+      }
+      prevBuffer = null;
+      scheduleRender();
+    }
+  });
+}
+
+function closeSessionPicker() {
+  showingSessionPicker = false;
+  pickerState = null;
+  prevBuffer = null;
+  scheduleRender();
+}
+
+async function selectPickerItem() {
+  if (!pickerState) return;
+  const item = pickerState.flatItems[pickerState.selectedIndex];
+  if (!item) return;
+
+  closeSessionPicker();
+
+  switch (item.type) {
+    case "create-local": {
+      const tags = tagMode
+        ? Object.fromEntries(tagFilters.filter((f) => f.value !== undefined).map((f) => [f.key, f.value!]))
+        : undefined;
+      const existingNames = new Set(panes.map((p) => p.source.type === "session" ? p.source.name : ""));
+      const name = autoSessionName(existingNames);
+      try {
+        await spawnDaemon({ name, command: defaultShell(), args: [], displayCommand: defaultShell(), tags });
+        if (!tagMode) {
+          const pane = await createAttachPane(name);
+          addPane(pane);
+        }
+        // In tag mode, EventFollower handles add
+      } catch {}
+      break;
+    }
+    case "create-remote": {
+      const tagArgs = tagFilters
+        .filter((f) => f.value !== undefined)
+        .flatMap((f) => ["--tag", `${f.key}=${f.value}`]);
+      const name = `remote-${Date.now()}`;
+      const pane = createLocalPane("pty-relay", [
+        "connect", item.relayUrl!, "--spawn", name, ...tagArgs,
+      ]);
+      addPane(pane);
+      break;
+    }
+    case "local": {
+      const pane = await createAttachPane(item.sessionName!);
+      if (tagSubscription) tagSubscription.track(item.sessionName!);
+      addPane(pane);
+      break;
+    }
+    case "remote": {
+      const pane = createLocalPane("pty-relay", [
+        "connect", `${item.relayUrl!}/${item.sessionName!}`,
+      ]);
+      addPane(pane);
+      break;
+    }
+  }
+}
+
+function handlePickerInput(data: Buffer) {
+  const str = data.toString("utf8");
+  let i = 0;
+  while (i < str.length) {
+    const code = str.charCodeAt(i);
+
+    // ESC — might be Esc key or start of arrow key sequence
+    if (code === 0x1b) {
+      if (i + 2 < str.length && str[i + 1] === "[") {
+        const dir = str[i + 2];
+        if (dir === "A") { // Up arrow
+          if (pickerState) {
+            pickerState = moveSelection(pickerState, -1);
+            prevBuffer = null;
+            scheduleRender();
+          }
+          i += 3;
+          continue;
+        } else if (dir === "B") { // Down arrow
+          if (pickerState) {
+            pickerState = moveSelection(pickerState, 1);
+            prevBuffer = null;
+            scheduleRender();
+          }
+          i += 3;
+          continue;
+        }
+      }
+      // Bare Esc — close picker
+      closeSessionPicker();
+      i++;
+      continue;
+    }
+
+    // Enter — select
+    if (code === 0x0d) {
+      selectPickerItem();
+      return; // picker is closed, stop processing
+    }
+
+    // Backspace
+    if (code === 0x7f || code === 0x08) {
+      if (pickerState && pickerState.filter.length > 0) {
+        pickerState = filterPicker(pickerState, pickerState.filter.slice(0, -1));
+        prevBuffer = null;
+        scheduleRender();
+      }
+      i++;
+      continue;
+    }
+
+    // Ctrl+C — close
+    if (code === 0x03) {
+      closeSessionPicker();
+      i++;
+      continue;
+    }
+
+    // Printable characters — append to filter
+    const ch = str[i]!;
+    if (ch >= " " && ch <= "~") {
+      if (pickerState) {
+        pickerState = filterPicker(pickerState, pickerState.filter + ch);
+        prevBuffer = null;
+        scheduleRender();
+      }
+    }
+    i++;
+  }
+}
+
 function handleStdin(data: Buffer) {
+  if (showingSessionPicker) {
+    handlePickerInput(data);
+    return;
+  }
+
   const focused = panes[focusedIndex];
   if (!focused || focused.handle.exited) return;
 
@@ -312,11 +429,6 @@ function handleStdin(data: Buffer) {
         break;
 
       case "focusIndex":
-        if (showingHiddenPicker) {
-          // In hidden picker mode, number keys unhide
-          unhidePane(action.index!);
-          break;
-        }
         if (action.index! >= 0 && action.index! < panes.length) {
           focusedIndex = action.index!;
           prevBuffer = null;
@@ -340,42 +452,18 @@ function handleStdin(data: Buffer) {
         }
         break;
 
-      case "newShell": {
-        const newShellTags = tagMode
-          ? Object.fromEntries(tagFilters.filter(f => f.value !== undefined).map(f => [f.key, f.value!]))
-          : undefined;
-        createSessionPane(defaultShell(), [], newShellTags).then((pane) => {
-          if (tagSubscription) tagSubscription.track(pane.source.type === "session" ? pane.source.name : "");
-          addPane(pane);
-        }).catch(() => {
-          addPane(createLocalPane(defaultShell(), []));
-        });
-        break;
-      }
-
-      case "newPty":
-        addPane(createLocalPane("pty", []));
+      case "newShell":
+        openSessionPicker();
         break;
 
       case "closePane":
         if (tagMode) {
-          hideCurrentPane();
-        } else {
-          removeFocusedPane();
+          // In tag mode, panes reflect tagged sessions — can't close
+          break;
         }
+        removeFocusedPane();
         break;
 
-      case "hidePane":
-        hideCurrentPane();
-        break;
-
-      case "showHiddenList":
-        if (hiddenPanes.length > 0) {
-          showingHiddenPicker = true;
-          prevBuffer = null;
-          scheduleRender();
-        }
-        break;
 
       case "mouseDown": {
         // Clear any completed selection
@@ -544,12 +632,6 @@ function handleStdin(data: Buffer) {
     }
   }
 
-  // Close hidden picker when prefix exits (Esc or unrecognized key)
-  if (showingHiddenPicker && !isPrefixPending()) {
-    showingHiddenPicker = false;
-    prevBuffer = null;
-    scheduleRender();
-  }
 }
 
 // --- CLI arg parsing ---
@@ -584,31 +666,25 @@ function parseArgs(argv: string[]): ParsedArgs {
     }
   }
 
-  if (specs.length === 0 && filters.length === 0) {
-    specs.push({ type: "local", command: defaultShell(), args: [] });
-  }
-
   return { specs, tagFilters: filters };
 }
 
 // --- Empty tag state ---
 
-function renderEmptyTagState(totalRows: number, totalCols: number): void {
+function renderEmptyState(totalRows: number, totalCols: number): void {
   const buf = new CellBuffer(totalRows, totalCols);
-  let label: string;
-  if (hiddenPanes.length > 0) {
-    label = `All panes hidden (${hiddenPanes.length}). ^] H to show hidden panes.`;
-  } else {
-    label = `Watching for sessions tagged ${formatTagFilters(tagFilters)}...`;
+
+  if (!showingSessionPicker) {
+    let label: string;
+    if (tagMode) {
+      label = `Watching for sessions tagged ${formatTagFilters(tagFilters)}...`;
+    } else {
+      label = `^] n to open session picker`;
+    }
+    const row = Math.floor(totalRows / 2);
+    const col = Math.max(1, Math.floor((totalCols - visibleLength(label)) / 2) + 1);
+    buf.writeAnsi(moveTo(row, col) + fg(100, 100, 100) + label + RESET);
   }
-  const row = Math.floor(totalRows / 2);
-  const col = Math.max(1, Math.floor((totalCols - visibleLength(label)) / 2) + 1);
-  const ansi =
-    moveTo(row, col) +
-    fg(100, 100, 100) +
-    label +
-    RESET;
-  buf.writeAnsi(ansi);
 
   // Status bar
   const left = " ^] command key | ^\\ detach";
@@ -617,13 +693,15 @@ function renderEmptyTagState(totalRows: number, totalCols: number): void {
   const rightLen = visibleLength(right);
   const pad = Math.max(totalCols - leftLen - rightLen, 0);
   const statusText = left + " ".repeat(pad) + right;
-  const statusAnsi =
-    moveTo(totalRows, 1) +
-    bg(40, 40, 40) +
-    fg(180, 180, 180) +
-    statusText.slice(0, totalCols) +
-    RESET;
-  buf.writeAnsi(statusAnsi);
+  buf.writeAnsi(
+    moveTo(totalRows, 1) + bg(40, 40, 40) + fg(180, 180, 180) +
+    statusText.slice(0, totalCols) + RESET,
+  );
+
+  // Session picker overlay
+  if (showingSessionPicker && pickerState) {
+    renderSessionPicker(buf, pickerState, totalRows, totalCols);
+  }
 
   process.stdout.write(fullRender(buf));
 }
@@ -700,9 +778,6 @@ async function main() {
       },
     });
 
-    tagSubscription.isHidden = (name) =>
-      hiddenPanes.some((p) => p.source.type === "session" && p.source.name === name);
-
     const initialSessions = await tagSubscription.start();
     for (const name of initialSessions) {
       try {
@@ -712,6 +787,11 @@ async function main() {
         // Session may have disappeared
       }
     }
+  }
+
+  // Open picker on startup if no panes and not in tag mode
+  if (panes.length === 0 && !tagMode) {
+    openSessionPicker();
   }
 
   // Initial render

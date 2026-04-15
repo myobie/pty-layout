@@ -36,9 +36,6 @@ export class TagSubscription {
   private callbacks: TagSubscriptionCallbacks;
   private tracked = new Set<string>();
   private follower: EventFollower;
-  /** Check if a session is hidden (provided by the consumer). */
-  isHidden: (sessionName: string) => boolean = () => false;
-
   constructor(filters: TagFilter[], callbacks: TagSubscriptionCallbacks) {
     this.filters = filters;
     this.callbacks = callbacks;
@@ -75,18 +72,12 @@ export class TagSubscription {
     this.tracked.add(sessionName);
   }
 
-  /** Untrack a session (e.g. when hidden). */
-  untrack(sessionName: string): void {
-    this.tracked.delete(sessionName);
-  }
-
   private handleEvent(event: EventRecord): void {
     if (event.type === "session_start") {
       const { session, tags } = event;
       if (
         matchesTags(this.filters, tags) &&
-        !this.tracked.has(session) &&
-        !this.isHidden(session)
+        !this.tracked.has(session)
       ) {
         this.tracked.add(session);
         this.callbacks.onAdd(session);

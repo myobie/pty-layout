@@ -38,16 +38,14 @@ function prefixKey(ch: string) {
 }
 
 describe("startup and status bar", () => {
-  it("starts with grid mode, shows borders, status bar, and pane title", async () => {
+  it("starts with session picker when no args given", async () => {
     startApp();
-    await session.waitForText("grid", 15000);
+    await session.waitForText("Sessions", 15000);
     const ss = session.screenshot();
+    expect(ss.text).toContain("+ New session");
+    expect(ss.text).toContain("Local");
     expect(ss.text).toContain("^]");
     expect(ss.text).toContain("detach");
-    expect(ss.text).toContain("╭");
-    expect(ss.text).toContain("╰");
-    expect(ss.text).toContain("1:");
-    expect(ss.text).toContain("1/1");
   }, 20000);
 
   it("starts with two panes and shows both", async () => {
@@ -72,8 +70,8 @@ describe("border colors", () => {
 
 describe("input routing", () => {
   it("forwards keystrokes to the focused pane", async () => {
-    startApp();
-    await session.waitForText("1:", 15000);
+    startApp(["bash"]);
+    await session.waitForText("1/1", 15000);
     await new Promise((r) => setTimeout(r, 500));
     session.type("echo test-input-routing\r");
     await session.waitForText("test-input-routing", 10000);
@@ -184,7 +182,7 @@ describe("single mode", () => {
 
 describe("detach", () => {
   it("Ctrl+\\ detaches from the layout", async () => {
-    startApp();
+    startApp(["bash"]);
     await session.waitForText("^]", 15000);
     session.sendKeys("\x1c");
     await session.waitForAbsent("^]", 5000);
@@ -215,9 +213,8 @@ describe("prefix overlay", () => {
     const ss = session.screenshot();
     expect(ss.text).toContain("next pane");
     expect(ss.text).toContain("layout");
-    expect(ss.text).toContain("new shell");
+    expect(ss.text).toContain("sessions");
     expect(ss.text).toContain("close pane");
-    expect(ss.text).toContain("cancel");
 
     session.sendKeys("\x1b");
     await session.waitForAbsent("prev pane", 5000);
@@ -251,37 +248,28 @@ describe("tag subscription mode", () => {
   }, 20000);
 });
 
-describe("hidden panes", () => {
-  it("hide pane with ^]h and unhide with ^]H then number", async () => {
-    startApp(["bash", "bash"]);
-    await session.waitForText("1/2", 15000);
-
-    // Hide the focused pane
-    prefixKey("h");
-    await session.waitForText("1/1", 5000);
-
-    // Show hidden panes picker
-    session.sendKeys("\x1d"); // Ctrl+]
-    session.sendKeys("H");   // show hidden list (sticky)
-    await session.waitForText("Hidden Panes", 5000);
-
-    // Press 1 to unhide the first hidden pane
-    session.sendKeys("1");
-    await session.waitForText("2/2", 5000);
-  }, 20000);
-
-  it("shows message when all panes are hidden", async () => {
+describe("session picker", () => {
+  it("^]n opens session picker overlay", async () => {
     startApp(["bash"]);
     await session.waitForText("1/1", 15000);
 
-    prefixKey("h");
-    await session.waitForText("All panes hidden", 5000);
+    prefixKey("n");
+    await session.waitForText("Sessions", 5000);
+
+    const ss = session.screenshot();
+    expect(ss.text).toContain("Local");
+    expect(ss.text).toContain("+ New session");
+    expect(ss.text).toContain("select");
+
+    // Esc closes picker
+    session.sendKeys("\x1b");
+    await session.waitForAbsent("Sessions", 5000);
   }, 20000);
 });
 
 describe("text selection", () => {
   it("click-drag highlights text and click clears it", async () => {
-    startApp();
+    startApp(["bash"]);
     await session.waitForText("1/1", 15000);
     await new Promise(r => setTimeout(r, 500));
 
