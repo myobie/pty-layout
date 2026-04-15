@@ -181,7 +181,7 @@ function renderStatusBar(
   focusedIndex: number,
   paneCount: number,
 ): void {
-  const left = " ^] command key | ^\\ detach";
+  const left = " ^] command key | ^\\ detach pane";
   const right = ` ${focusedIndex + 1}/${paneCount} ${MODE_LABELS[layoutMode]} `;
 
   // Pad to fill the row
@@ -256,7 +256,7 @@ function renderPrefixOverlay(
     [",", "prev pane ", ".", "next pane "],
     ["1-9", "jump to # ", "l", "layout    "],
     ["n", "sessions  ", "w", "close pane"],
-    ["Esc", "cancel    ", "", "          "],
+    ["q", "quit      ", "Esc", "cancel    "],
   ];
 
   const colWidth = 17;

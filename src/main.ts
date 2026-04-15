@@ -626,6 +626,12 @@ function handleStdin(data: Buffer) {
       }
 
       case "detach":
+        // Ctrl+\ detaches from focused pane (same as close)
+        if (tagMode) break; // Can't close in tag mode
+        removeFocusedPane();
+        break;
+
+      case "quit":
         detach();
         process.exit(0);
         break;
@@ -687,7 +693,7 @@ function renderEmptyState(totalRows: number, totalCols: number): void {
   }
 
   // Status bar
-  const left = " ^] command key | ^\\ detach";
+  const left = " ^] command key | ^\\ detach pane";
   const right = ` 0/0 grid `;
   const leftLen = visibleLength(left);
   const rightLen = visibleLength(right);

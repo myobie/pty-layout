@@ -25,7 +25,7 @@ function startApp(
 
 afterEach(async () => {
   if (session) {
-    try { session.sendKeys("\x1c"); } catch {}
+    try { session.sendKeys("\x1dq"); } catch {} // ^] q to quit
     await new Promise((r) => setTimeout(r, 300));
     await session.close();
     await new Promise((r) => setTimeout(r, 500));
@@ -180,11 +180,18 @@ describe("single mode", () => {
   }, 30000);
 });
 
-describe("detach", () => {
-  it("Ctrl+\\ detaches from the layout", async () => {
+describe("detach and quit", () => {
+  it("Ctrl+\\ detaches the focused pane", async () => {
+    startApp(["bash", "bash"]);
+    await session.waitForText("1/2", 15000);
+    session.sendKeys("\x1c");
+    await session.waitForText("1/1", 5000);
+  }, 20000);
+
+  it("^]q quits the layout", async () => {
     startApp(["bash"]);
     await session.waitForText("^]", 15000);
-    session.sendKeys("\x1c");
+    prefixKey("q");
     await session.waitForAbsent("^]", 5000);
   }, 20000);
 });

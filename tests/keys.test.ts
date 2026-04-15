@@ -41,6 +41,14 @@ describe("Ctrl+\\ detach", () => {
   });
 });
 
+describe("prefix quit command", () => {
+  it("q produces quit action", () => {
+    const write = vi.fn();
+    const actions = processInput(Buffer.from("\x1dq"), write);
+    expect(actions).toEqual([{ type: "quit" }]);
+  });
+});
+
 describe("Ctrl+] prefix key", () => {
   it("enters prefix mode when alone in buffer", () => {
     const write = vi.fn();

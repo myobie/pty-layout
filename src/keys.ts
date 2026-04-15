@@ -7,6 +7,7 @@ export interface Action {
     | "newShell"
     | "closePane"
     | "detach"
+    | "quit"
     | "mouseDown"
     | "mouseDrag"
     | "mouseUp"
@@ -24,6 +25,7 @@ const COMMAND_MAP: Record<string, Action> = {
   l: { type: "cycleLayout" },
   n: { type: "newShell" },
   w: { type: "closePane" },
+  q: { type: "quit" },
   ",": { type: "focusPrev" },
   ".": { type: "focusNext" },
   "1": { type: "focusIndex", index: 0 },
