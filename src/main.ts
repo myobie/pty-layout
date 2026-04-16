@@ -312,6 +312,14 @@ function openSessionPicker() {
 function closeSessionPicker() {
   showingSessionPicker = false;
   pickerState = null;
+
+  // If the picker was the only reason to be alive, quit
+  if (panes.length === 0 && !tagMode) {
+    detach();
+    process.exit(0);
+    return;
+  }
+
   prevBuffer = null;
   scheduleRender();
 }

@@ -367,7 +367,9 @@ export function renderSessionPicker(
   totalCols: number,
 ): void {
   const contentWidth = Math.min(58, totalCols - 4);
-  const maxVisibleItems = Math.min(15, totalRows - 8);
+  // Use most of the screen height (leave 4 rows breathing room, plus box
+  // chrome: 2 borders + filter + footer = 4 more).
+  const maxVisibleItems = Math.max(3, totalRows - 8);
 
   const visualRows = buildPickerVisualRows(state);
   const totalVisualRows = visualRows.length;

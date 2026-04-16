@@ -49,6 +49,35 @@ describe("prefix quit command", () => {
   });
 });
 
+describe("paste with embedded control chars", () => {
+  it("Ctrl+] in middle of paste triggers prefix + forwards text around it", () => {
+    const write = vi.fn();
+    const actions = processInput(Buffer.from("hello\x1dlworld"), write);
+    // "hello" forwarded, Ctrl+] consumed, "l" in same buffer = cycleLayout,
+    // "world" forwarded
+    expect(write).toHaveBeenCalledWith("hello");
+    expect(actions).toEqual([{ type: "cycleLayout" }]);
+    expect(write).toHaveBeenCalledWith("world");
+  });
+
+  it("Ctrl+\\ in middle of paste produces detach + forwards text around it", () => {
+    const write = vi.fn();
+    const actions = processInput(Buffer.from("before\x1cafter"), write);
+    expect(actions).toEqual([{ type: "detach" }]);
+    expect(write).toHaveBeenCalledWith("before");
+    expect(write).toHaveBeenCalledWith("after");
+  });
+
+  it("multiple control chars in a single buffer produce multiple actions", () => {
+    const write = vi.fn();
+    const actions = processInput(Buffer.from("\x1dl\x1dn"), write);
+    expect(actions).toEqual([
+      { type: "cycleLayout" },
+      { type: "newShell" },
+    ]);
+  });
+});
+
 describe("CSI u keybindings (kitty keyboard protocol)", () => {
   it("Ctrl+] via CSI u enters prefix mode", () => {
     const write = vi.fn();

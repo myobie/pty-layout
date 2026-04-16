@@ -190,11 +190,28 @@ describe("detach and quit", () => {
     await session.waitForText("1/1", 5000);
   }, 20000);
 
+  it("Ctrl+\\ on last pane quits the layout", async () => {
+    startApp(["bash"]);
+    await session.waitForText("1/1", 15000);
+    session.sendKeys("\x1c");
+    // App should exit when last pane is detached in non-tag mode
+    await session.waitForAbsent("^]", 5000);
+  }, 20000);
+
   it("^]q quits the layout", async () => {
     startApp(["bash"]);
     await session.waitForText("^]", 15000);
     prefixKey("q");
     await session.waitForAbsent("^]", 5000);
+  }, 20000);
+
+  it("child exit removes the pane", async () => {
+    startApp(["bash", "bash"]);
+    await session.waitForText("1/2", 15000);
+    await new Promise((r) => setTimeout(r, 300));
+    session.type("exit\r");
+    // Focused pane exits, layout drops to 1/1
+    await session.waitForText("1/1", 10000);
   }, 20000);
 });
 
@@ -288,6 +305,39 @@ describe("stats logging", () => {
 });
 
 describe("session picker", () => {
+  it("Esc on startup picker with no panes quits the app", async () => {
+    startApp();
+    await session.waitForText("Sessions", 15000);
+
+    // Press Esc — with zero panes and no tag mode, app should quit
+    session.sendKeys("\x1b");
+    await session.waitForAbsent("Sessions", 5000);
+  }, 20000);
+
+  it("Enter with empty filter result does not crash", async () => {
+    startApp(["bash"]);
+    await session.waitForText("1/1", 15000);
+
+    prefixKey("n");
+    await session.waitForText("Sessions", 5000);
+
+    // Type a filter that matches nothing
+    session.type("zzznotarealsessionname");
+    await new Promise((r) => setTimeout(r, 300));
+
+    // Press Enter — should do nothing (no item to select)
+    session.sendKeys("\r");
+    await new Promise((r) => setTimeout(r, 300));
+
+    // Picker should still be visible
+    const ss = session.screenshot();
+    expect(ss.text).toContain("Sessions");
+
+    // Esc closes it
+    session.sendKeys("\x1b");
+    await session.waitForAbsent("Sessions", 5000);
+  }, 20000);
+
   it("^]n opens session picker overlay", async () => {
     startApp(["bash"]);
     await session.waitForText("1/1", 15000);
