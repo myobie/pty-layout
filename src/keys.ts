@@ -1,3 +1,5 @@
+import { positionKeyToIndex } from "./positions.ts";
+
 export interface Action {
   type:
     | "cycleLayout"
@@ -6,6 +8,7 @@ export interface Action {
     | "focusNext"
     | "newShell"
     | "closePane"
+    | "movePane"
     | "detach"
     | "quit"
     | "mouseDown"
@@ -18,25 +21,18 @@ export interface Action {
   col?: number;
 }
 
-// Keys that stay in prefix mode after executing (for repeated navigation)
-const STICKY_KEYS = new Set([",", "."]);
+// Keys that stay in prefix mode after executing (for repeated navigation).
+// `m` stays active so the next keypress is interpreted as a move target.
+const STICKY_KEYS = new Set([",", ".", "m"]);
 
 const COMMAND_MAP: Record<string, Action> = {
   l: { type: "cycleLayout" },
   n: { type: "newShell" },
   w: { type: "closePane" },
   q: { type: "quit" },
+  m: { type: "movePane" }, // Enters move mode; next position key picks target
   ",": { type: "focusPrev" },
   ".": { type: "focusNext" },
-  "1": { type: "focusIndex", index: 0 },
-  "2": { type: "focusIndex", index: 1 },
-  "3": { type: "focusIndex", index: 2 },
-  "4": { type: "focusIndex", index: 3 },
-  "5": { type: "focusIndex", index: 4 },
-  "6": { type: "focusIndex", index: 5 },
-  "7": { type: "focusIndex", index: 6 },
-  "8": { type: "focusIndex", index: 7 },
-  "9": { type: "focusIndex", index: 8 },
 };
 
 /**
@@ -257,7 +253,16 @@ export function processInput(
 
       // Try command map
       const key = str[i]!;
-      const action = COMMAND_MAP[key] ?? COMMAND_MAP[key.toLowerCase()];
+      let action = COMMAND_MAP[key] ?? COMMAND_MAP[key.toLowerCase()];
+
+      // If not a command, maybe it's a position key (digit or letter)
+      if (!action) {
+        const posIdx = positionKeyToIndex(key);
+        if (posIdx !== null) {
+          action = { type: "focusIndex", index: posIdx };
+        }
+      }
+
       flush(i);
       i++;
       forwardStart = i;

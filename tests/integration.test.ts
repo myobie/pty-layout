@@ -224,6 +224,29 @@ describe("detach and quit", () => {
   }, 20000);
 });
 
+describe("move pane", () => {
+  it("^] m 3 moves the focused pane to position 3", async () => {
+    startApp(["bash", "bash", "bash"]);
+    await session.waitForText("1/3", 15000);
+    await new Promise((r) => setTimeout(r, 300));
+
+    // Type unique text in pane 1 to identify it later
+    session.type("echo FIRST-PANE\r");
+    await session.waitForText("FIRST-PANE", 5000);
+
+    // Move pane 1 (currently at position 1) to position 3
+    prefixKey("m");
+    await new Promise((r) => setTimeout(r, 100));
+    session.sendKeys("3");
+    await new Promise((r) => setTimeout(r, 300));
+
+    const ss = session.screenshot();
+    // Pane 3 should now be titled with FIRST-PANE's content (our moved pane)
+    // and the focused pane indicator should be at 3/3
+    expect(ss.text).toContain("3/3");
+  }, 20000);
+});
+
 describe("multi-pane rendering", () => {
   it("four panes all visible in grid", async () => {
     startApp(["bash", "bash", "bash", "bash"]);

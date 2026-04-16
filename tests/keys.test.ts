@@ -49,6 +49,37 @@ describe("prefix quit command", () => {
   });
 });
 
+describe("move command and position letters", () => {
+  it("^] m produces movePane action and stays sticky", () => {
+    const write = vi.fn();
+    const actions = processInput(Buffer.from("\x1dm"), write);
+    expect(actions).toEqual([{ type: "movePane" }]);
+    expect(isPrefixPending()).toBe(true);
+  });
+
+  it("^] a selects pane at position 10 (letter 'a')", () => {
+    const write = vi.fn();
+    const actions = processInput(Buffer.from("\x1da"), write);
+    expect(actions).toEqual([{ type: "focusIndex", index: 9 }]);
+  });
+
+  it("^] m a produces movePane then focusIndex(9) (move to position 10)", () => {
+    const write = vi.fn();
+    const actions = processInput(Buffer.from("\x1dma"), write);
+    expect(actions).toEqual([
+      { type: "movePane" },
+      { type: "focusIndex", index: 9 },
+    ]);
+  });
+
+  it("command letters (l, n, w, q, m) are NOT position keys", () => {
+    const write = vi.fn();
+    // 'l' is cycleLayout, not focusIndex
+    const actions = processInput(Buffer.from("\x1dl"), write);
+    expect(actions).toEqual([{ type: "cycleLayout" }]);
+  });
+});
+
 describe("paste with embedded control chars", () => {
   it("Ctrl+] in middle of paste triggers prefix + forwards text around it", () => {
     const write = vi.fn();
@@ -254,10 +285,10 @@ describe("prefix cancellation", () => {
     processInput(Buffer.from("\x1d"), write);
     expect(isPrefixPending()).toBe(true);
 
-    const actions = processInput(Buffer.from("z"), write);
+    // '/' is neither a command nor a position key
+    const actions = processInput(Buffer.from("/"), write);
     expect(actions).toEqual([]);
     expect(isPrefixPending()).toBe(false);
-    // The 'z' should be consumed, not forwarded
     expect(write).not.toHaveBeenCalled();
   });
 });

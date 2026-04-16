@@ -54,6 +54,7 @@ let tagFilters: TagFilter[] = [];
 let tagMode = false;
 let showingSessionPicker = false;
 let pickerState: PickerState | null = null;
+let moveMode = false; // true between ^] m and the position key that follows
 let stopStats: (() => void) | null = null;
 
 // --- Terminal helpers ---
@@ -168,6 +169,7 @@ function doRender() {
     scrollOffsets,
     selection,
     showingSessionPicker ? pickerState : null,
+    moveMode,
   );
 
   process.stdout.write(output);
@@ -481,6 +483,11 @@ function handleStdin(data: Buffer) {
   });
 
   if (isPrefixPending() !== wasPrefixed) {
+    // If prefix mode exits without a follow-up position key (e.g. Esc),
+    // cancel move mode too.
+    if (!isPrefixPending() && moveMode && actions.every((a) => a.type !== "focusIndex")) {
+      moveMode = false;
+    }
     prevBuffer = null;
     scheduleRender();
   }
@@ -494,8 +501,33 @@ function handleStdin(data: Buffer) {
         break;
 
       case "focusIndex":
-        if (action.index! >= 0 && action.index! < panes.length) {
+        if (moveMode) {
+          moveMode = false;
+          const targetIdx = action.index!;
+          if (targetIdx >= 0 && targetIdx < panes.length && targetIdx !== focusedIndex) {
+            const pane = panes[focusedIndex]!;
+            const offset = scrollOffsets[focusedIndex] ?? 0;
+            panes.splice(focusedIndex, 1);
+            scrollOffsets.splice(focusedIndex, 1);
+            panes.splice(targetIdx, 0, pane);
+            scrollOffsets.splice(targetIdx, 0, offset);
+            focusedIndex = targetIdx;
+            prevBuffer = null;
+            scheduleRender();
+          } else {
+            prevBuffer = null;
+            scheduleRender();
+          }
+        } else if (action.index! >= 0 && action.index! < panes.length) {
           focusedIndex = action.index!;
+          prevBuffer = null;
+          scheduleRender();
+        }
+        break;
+
+      case "movePane":
+        if (panes.length > 1) {
+          moveMode = true;
           prevBuffer = null;
           scheduleRender();
         }

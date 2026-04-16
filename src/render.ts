@@ -15,6 +15,7 @@ import type { PaneRect, LayoutMode } from "./layout.ts";
 import type { Pane } from "./pane.ts";
 import { type SelectionState, isSelected, hasDragDistance } from "./selection.ts";
 import type { PickerState } from "./session-picker.ts";
+import { indexToPositionKey } from "./positions.ts";
 
 type Cell = ReturnType<Pane["handle"]["readCells"]>[0][0];
 
@@ -49,6 +50,7 @@ export function renderFrame(
   scrollOffsets: number[] = [],
   selection?: SelectionState | null,
   sessionPicker?: PickerState | null,
+  moveMode: boolean = false,
 ): { output: string; buffer: CellBuffer } {
   const buf = new CellBuffer(totalRows, totalCols);
 
@@ -75,8 +77,8 @@ export function renderFrame(
   for (const { pane, rect, paneIndex } of visible) {
     const isFocused = paneIndex === focusedIndex;
     const borderColor = isFocused ? GREEN : GREY;
-    const titleNum = paneIndex + 1;
-    const title = `${titleNum}: ${pane.title}`;
+    const titleKey = indexToPositionKey(paneIndex) ?? String(paneIndex + 1);
+    const title = `${titleKey}: ${pane.title}`;
 
     // Draw border with title and fill
     const boxAnsi =
@@ -154,7 +156,7 @@ export function renderFrame(
     renderSessionPicker(buf, sessionPicker, totalRows, totalCols);
   } else if (prefixActive) {
     renderPaneBadges(buf, visible);
-    renderPrefixOverlay(buf, totalRows, totalCols);
+    renderPrefixOverlay(buf, totalRows, totalCols, moveMode);
   }
 
   // Diff against previous buffer
@@ -208,8 +210,8 @@ function renderPaneBadges(
   visible: { pane: Pane; rect: PaneRect; paneIndex: number }[],
 ): void {
   for (const { rect, paneIndex } of visible) {
-    if (paneIndex > 8) continue; // Only 1-9
-    const num = String(paneIndex + 1);
+    const num = indexToPositionKey(paneIndex);
+    if (num === null) continue; // beyond our addressable range
 
     if (rect.innerWidth >= 5 && rect.innerHeight >= 3) {
       // Draw a small box badge centered in the pane
@@ -251,12 +253,18 @@ export function renderPrefixOverlay(
   buf: CellBuffer,
   totalRows: number,
   totalCols: number,
+  moveMode: boolean = false,
 ): void {
-  const lines = [
+  const lines = moveMode ? [
+    ["", "Pick a position to move this pane to:", "", ""],
+    ["1-9", "position  ", "a-z", "position "],
+    ["Esc", "cancel    ", "", "          "],
+  ] : [
     [",", "prev pane ", ".", "next pane "],
-    ["1-9", "jump to # ", "l", "layout    "],
-    ["n", "sessions  ", "w", "close pane"],
-    ["q", "quit      ", "Esc", "cancel    "],
+    ["1-9,a-z", "jump to # ", "l", "layout   "],
+    ["m", "move pane ", "n", "sessions  "],
+    ["w", "close pane", "q", "quit      "],
+    ["Esc", "cancel    ", "", "          "],
   ];
 
   const colWidth = 17;
