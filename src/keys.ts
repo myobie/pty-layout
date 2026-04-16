@@ -83,6 +83,55 @@ function parseSgrMouse(
   return { button, col, row, press, length: j - start };
 }
 
+/**
+ * Parse a CSI u sequence for our keybindings: ESC [ codepoint ; modifier u
+ * Only matches Ctrl+] (93;5) and Ctrl+\ (92;5).
+ */
+function parseCsiU(
+  str: string,
+  start: number,
+): { codepoint: number; modifier: number; length: number } | null {
+  if (str[start] !== "\x1b" || str[start + 1] !== "[") return null;
+  let j = start + 2;
+
+  let codepoint = 0;
+  const cpStart = j;
+  while (j < str.length && str[j]! >= "0" && str[j]! <= "9") {
+    codepoint = codepoint * 10 + (str.charCodeAt(j) - 0x30);
+    j++;
+  }
+  if (j === cpStart) return null;
+
+  // Skip optional :alternate_codepoints
+  while (j < str.length && str[j] === ":") {
+    j++;
+    while (j < str.length && str[j]! >= "0" && str[j]! <= "9") j++;
+  }
+
+  let modifier = 1;
+  if (j < str.length && str[j] === ";") {
+    j++;
+    modifier = 0;
+    const modStart = j;
+    while (j < str.length && str[j]! >= "0" && str[j]! <= "9") {
+      modifier = modifier * 10 + (str.charCodeAt(j) - 0x30);
+      j++;
+    }
+    if (j === modStart) return null;
+
+    // Skip optional :event_type
+    if (j < str.length && str[j] === ":") {
+      j++;
+      while (j < str.length && str[j]! >= "0" && str[j]! <= "9") j++;
+    }
+  }
+
+  if (j >= str.length || str[j] !== "u") return null;
+  j++;
+
+  return { codepoint, modifier, length: j - start };
+}
+
 // Ctrl+] prefix state
 let prefixPending = false;
 
@@ -147,6 +196,36 @@ export function processInput(
         i += mouse.length;
         forwardStart = i;
         continue;
+      }
+    }
+
+    // --- CSI u keybindings (kitty keyboard protocol) ---
+    // When the kitty keyboard protocol is active, Ctrl+] and Ctrl+\ are
+    // encoded as CSI u sequences instead of raw control characters.
+    if (str[i] === "\x1b" && i + 1 < str.length && str[i + 1] === "[") {
+      const csiU = parseCsiU(str, i);
+      if (csiU) {
+        const hasCtrl = !!((csiU.modifier - 1) & 4);
+        if (hasCtrl && csiU.codepoint === 0x5d) {
+          // Ctrl+] via CSI u
+          flush(i);
+          i += csiU.length;
+          forwardStart = i;
+          if (prefixPending) {
+            prefixPending = false; // Ctrl+] again cancels prefix
+          } else {
+            prefixPending = true;
+          }
+          continue;
+        }
+        if (hasCtrl && csiU.codepoint === 0x5c) {
+          // Ctrl+\ via CSI u
+          flush(i);
+          actions.push({ type: "detach" });
+          i += csiU.length;
+          forwardStart = i;
+          continue;
+        }
       }
     }
 

@@ -1,5 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import * as path from "node:path";
+import * as fs from "node:fs";
+import * as os from "node:os";
 import { Session } from "@myobie/pty/testing";
 import { spawnDaemon } from "@myobie/pty/client";
 
@@ -9,7 +11,7 @@ let session: Session;
 
 function startApp(
   args: string[] = [],
-  opts: { rows?: number; cols?: number } = {},
+  opts: { rows?: number; cols?: number; env?: Record<string, string> } = {},
 ): Session {
   session = Session.spawn(
     "node",
@@ -17,7 +19,7 @@ function startApp(
     {
       rows: opts.rows ?? 30,
       cols: opts.cols ?? 100,
-      env: { TERM: "xterm-256color" },
+      env: { TERM: "xterm-256color", ...(opts.env ?? {}) },
     },
   );
   return session;
@@ -252,6 +254,36 @@ describe("tag subscription mode", () => {
     // Should show the bash pane immediately (from the explicit spec)
     await session.waitForText("1/1", 15000);
     // And be watching for tagged sessions (won't exit when bash exits)
+  }, 20000);
+});
+
+describe("stats logging", () => {
+  it("writes launched and sample events to stats.jsonl", async () => {
+    const tempState = fs.mkdtempSync(path.join(os.tmpdir(), "pty-layout-stats-int-"));
+    try {
+      startApp(["bash"], { env: { XDG_STATE_HOME: tempState } });
+      await session.waitForText("1/1", 15000);
+      // Give it a moment to write the initial events
+      await new Promise((r) => setTimeout(r, 500));
+
+      const statsFile = path.join(tempState, "pty-layout", "stats.jsonl");
+      expect(fs.existsSync(statsFile)).toBe(true);
+
+      const events = fs.readFileSync(statsFile, "utf8")
+        .trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+
+      const launched = events.find((e) => e.type === "launched");
+      expect(launched).toBeDefined();
+      expect(launched.pid).toBeGreaterThan(0);
+      expect(launched.id).toMatch(/^[0-9a-f-]{36}$/);
+
+      const sample = events.find((e) => e.type === "sample");
+      expect(sample).toBeDefined();
+      expect(sample.rss).toBeGreaterThan(0);
+      expect(sample.panes).toBe(1);
+    } finally {
+      fs.rmSync(tempState, { recursive: true, force: true });
+    }
   }, 20000);
 });
 

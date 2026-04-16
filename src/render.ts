@@ -297,6 +297,69 @@ function renderPrefixOverlay(
   buf.writeAnsi(ansi);
 }
 
+export interface PickerVisualRow {
+  kind: "header" | "item";
+  content: string;       // pre-rendered line content (without padding/truncation)
+  itemIndex?: number;    // only set for "item" rows — maps to state.flatItems
+}
+
+/** Build the full list of visual rows (headers + items) with item-index mapping. */
+export function buildPickerVisualRows(state: PickerState): PickerVisualRow[] {
+  const rows: PickerVisualRow[] = [];
+  let itemIndex = 0;
+  for (const group of state.groups) {
+    rows.push({ kind: "header", content: " " + group.title + " " });
+    for (const item of group.items) {
+      let line: string;
+      if (item.type === "create-local" || item.type === "create-remote") {
+        line = item.label;
+      } else {
+        const dot = "● ";
+        const detail = item.detail ? "  " + item.detail : "";
+        line = dot + item.label + detail;
+      }
+      rows.push({ kind: "item", content: line, itemIndex });
+      itemIndex++;
+    }
+  }
+  return rows;
+}
+
+/** Compute scroll offset that keeps the selected item visible in the viewport. */
+export function computePickerScroll(
+  rows: PickerVisualRow[],
+  selectedIndex: number,
+  viewportHeight: number,
+): number {
+  // Find the visual row of the selected item
+  let selectedVisualRow = -1;
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i]!.kind === "item" && rows[i]!.itemIndex === selectedIndex) {
+      selectedVisualRow = i;
+      break;
+    }
+  }
+  if (selectedVisualRow === -1) return 0;
+
+  // If selected row is above the viewport: scroll up so it's at the top
+  // If below: scroll down so it's at the bottom
+  // Try to include the group header of the selected row when possible
+  const headerRow = selectedVisualRow > 0 && rows[selectedVisualRow - 1]!.kind === "header"
+    ? selectedVisualRow - 1
+    : -1;
+
+  let offset = Math.max(0, selectedVisualRow - viewportHeight + 1);
+  // If we can fit the header too, include it
+  if (headerRow !== -1 && headerRow >= offset) {
+    // already visible
+  } else if (headerRow !== -1 && selectedVisualRow - headerRow + 1 <= viewportHeight) {
+    offset = Math.max(0, headerRow);
+  }
+  // Clamp to list bounds
+  offset = Math.min(offset, Math.max(0, rows.length - viewportHeight));
+  return offset;
+}
+
 export function renderSessionPicker(
   buf: CellBuffer,
   state: PickerState,
@@ -306,23 +369,27 @@ export function renderSessionPicker(
   const contentWidth = Math.min(58, totalCols - 4);
   const maxVisibleItems = Math.min(15, totalRows - 8);
 
-  // Count lines needed: group headers + items
-  let lineCount = 0;
-  for (const group of state.groups) {
-    lineCount += 1; // header
-    lineCount += group.items.length;
-  }
-  lineCount = Math.min(lineCount, maxVisibleItems);
-  if (lineCount === 0) lineCount = 1; // at least one line for "Loading..."
+  const visualRows = buildPickerVisualRows(state);
+  const totalVisualRows = visualRows.length;
+
+  // Box height is fixed at maxVisibleItems when list is long enough to scroll.
+  // If list is shorter, shrink the box.
+  const listHeight = totalVisualRows === 0
+    ? 1 // one row for "Loading..." or empty
+    : Math.min(totalVisualRows, maxVisibleItems);
 
   const hasFilter = state.filter.length > 0;
-  const boxHeight = lineCount + (hasFilter ? 4 : 3); // borders + optional filter + footer
+  const boxHeight = listHeight + (hasFilter ? 4 : 3); // borders + optional filter + footer
   const boxWidth = contentWidth + 2;
 
   if (totalRows < boxHeight + 2 || totalCols < boxWidth + 2) return;
 
   const startRow = Math.floor((totalRows - boxHeight) / 2) + 1;
   const startCol = Math.floor((totalCols - boxWidth) / 2) + 1;
+
+  const scrollOffset = computePickerScroll(visualRows, state.selectedIndex, listHeight);
+  const moreAbove = scrollOffset > 0;
+  const moreBelow = scrollOffset + listHeight < totalVisualRows;
 
   const title = state.loading ? " Sessions (loading...) " : " Sessions ";
 
@@ -347,47 +414,38 @@ export function renderSessionPicker(
     row++;
   }
 
-  // Grouped list
-  let itemIndex = 0;
-  let linesRendered = 0;
+  // Render visible window of rows
+  const windowEnd = Math.min(scrollOffset + listHeight, totalVisualRows);
+  for (let i = scrollOffset; i < windowEnd; i++) {
+    const vr = visualRows[i]!;
+    let line: string;
+    let fgColor: [number, number, number];
 
-  for (const group of state.groups) {
-    if (linesRendered >= maxVisibleItems) break;
+    if (vr.kind === "header") {
+      line = vr.content;
+      fgColor = OVERLAY_KEY;
+    } else {
+      const isSel = vr.itemIndex === state.selectedIndex;
+      fgColor = isSel ? OVERLAY_KEY : OVERLAY_FG;
+      const prefix = isSel ? "▸ " : "  ";
+      line = prefix + vr.content;
+    }
 
-    // Group header
+    // Scroll indicators on the first and last visible rows
+    const isFirstVisible = i === scrollOffset;
+    const isLastVisible = i === windowEnd - 1;
+    if (isFirstVisible && moreAbove) {
+      line = line.slice(0, contentWidth - 2) + " ↑";
+    } else if (isLastVisible && moreBelow) {
+      line = line.slice(0, contentWidth - 2) + " ↓";
+    }
+
     ansi +=
       moveTo(row, startCol + 1) +
       bg(OVERLAY_BG[0], OVERLAY_BG[1], OVERLAY_BG[2]) +
-      fg(OVERLAY_KEY[0], OVERLAY_KEY[1], OVERLAY_KEY[2]) +
-      (" " + group.title + " ").padEnd(contentWidth);
+      fg(fgColor[0], fgColor[1], fgColor[2]) +
+      line.slice(0, contentWidth).padEnd(contentWidth);
     row++;
-    linesRendered++;
-
-    for (const item of group.items) {
-      if (linesRendered >= maxVisibleItems) break;
-
-      const isSel = itemIndex === state.selectedIndex;
-      const fgColor = isSel ? OVERLAY_KEY : OVERLAY_FG;
-      const prefix = isSel ? "▸ " : "  ";
-
-      let line: string;
-      if (item.type === "create-local" || item.type === "create-remote") {
-        line = prefix + item.label;
-      } else {
-        const dot = "● ";
-        const detail = item.detail ? "  " + item.detail : "";
-        line = prefix + dot + item.label + detail;
-      }
-
-      ansi +=
-        moveTo(row, startCol + 1) +
-        bg(OVERLAY_BG[0], OVERLAY_BG[1], OVERLAY_BG[2]) +
-        fg(fgColor[0], fgColor[1], fgColor[2]) +
-        line.slice(0, contentWidth).padEnd(contentWidth);
-      row++;
-      linesRendered++;
-      itemIndex++;
-    }
   }
 
   // Footer

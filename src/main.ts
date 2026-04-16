@@ -27,6 +27,7 @@ import {
   parseTagFilter,
   formatTagFilters,
 } from "./tag-subscription.ts";
+import { startStats, newLaunchId } from "./stats.ts";
 
 const enterAltScreen = "\x1b[?1049h";
 const leaveAltScreen = "\x1b[?1049l";
@@ -51,6 +52,7 @@ let tagFilters: TagFilter[] = [];
 let tagMode = false;
 let showingSessionPicker = false;
 let pickerState: PickerState | null = null;
+let stopStats: (() => void) | null = null;
 
 // --- Terminal helpers ---
 
@@ -94,8 +96,38 @@ function scheduleRender(urgent = false) {
   }, 8);
 }
 
+// --- Mode proxying to outer terminal ---
+// When focused pane has kitty keyboard protocol active, forward it to Kitty.
+// On focus change, retract old pane's modes and apply new pane's modes.
+
+let proxiedKittyFlags: number[] = [];
+
+function syncModesToTerminal() {
+  const focused = panes[focusedIndex];
+  const newFlags = focused?.handle.kittyKeyboardFlags ?? [];
+
+  // Only write if flags changed
+  if (newFlags.length === proxiedKittyFlags.length &&
+      newFlags.every((f, i) => f === proxiedKittyFlags[i])) {
+    return;
+  }
+
+  // Pop old flags
+  for (let i = 0; i < proxiedKittyFlags.length; i++) {
+    process.stdout.write("\x1b[<u");
+  }
+
+  // Push new flags
+  for (const flags of newFlags) {
+    process.stdout.write(`\x1b[>${flags}u`);
+  }
+
+  proxiedKittyFlags = [...newFlags];
+}
+
 function doRender() {
   if (!running) return;
+  syncModesToTerminal();
 
   if (panes.length === 0) {
     if (showingSessionPicker || tagMode) {
@@ -235,6 +267,13 @@ function detach() {
   if (!running) return;
   running = false;
   tagSubscription?.stop();
+  stopStats?.();
+  stopStats = null;
+  // Pop any proxied kitty keyboard flags
+  for (let i = 0; i < proxiedKittyFlags.length; i++) {
+    process.stdout.write("\x1b[<u");
+  }
+  proxiedKittyFlags = [];
   // Detach: release handles but don't kill processes.
   // For attached sessions, handle.kill() sends detach (not terminate).
   // For local createPty processes, they'll be cleaned up when our process exits.
@@ -611,8 +650,13 @@ function handleStdin(data: Buffer) {
               scrollPane.handle.write(`\x1b[<${btn};${relCol};${relRow}M`);
             }
           }
+        } else if (scrollPane.handle.alternateScreen) {
+          // Alternate screen without mouse mode (TUI apps like claude, htop, less)
+          // Convert scroll to arrow keys, like Kitty does natively
+          const arrow = action.type === "scrollUp" ? "\x1b[A" : "\x1b[B";
+          scrollPane.handle.write(arrow.repeat(3));
         } else {
-          // No mouse mode — scroll through scrollback buffer
+          // Normal screen, no mouse mode — scroll through scrollback buffer
           const offset = scrollOffsets[scrollIdx] ?? 0;
           if (action.type === "scrollUp") {
             scrollOffsets[scrollIdx] = Math.min(offset + 3, scrollPane.handle.baseY);
@@ -799,6 +843,27 @@ async function main() {
   if (panes.length === 0 && !tagMode) {
     openSessionPicker();
   }
+
+  // Start stats logging
+  const launchId = newLaunchId();
+  stopStats = startStats(
+    {
+      args: process.argv.slice(2),
+      initialPanes: panes.length,
+      tagMode,
+    },
+    {
+      id: launchId,
+      paneCount: () => panes.length,
+      totalCells: () => {
+        let total = 0;
+        for (const pane of panes) {
+          total += pane.handle.cols * pane.handle.rows;
+        }
+        return total;
+      },
+    },
+  );
 
   // Initial render
   scheduleRender();

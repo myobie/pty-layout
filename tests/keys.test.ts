@@ -49,6 +49,58 @@ describe("prefix quit command", () => {
   });
 });
 
+describe("CSI u keybindings (kitty keyboard protocol)", () => {
+  it("Ctrl+] via CSI u enters prefix mode", () => {
+    const write = vi.fn();
+    // CSI u: codepoint 93 (]), modifier 5 (Ctrl)
+    const actions = processInput(Buffer.from("\x1b[93;5u"), write);
+    expect(actions).toEqual([]);
+    expect(isPrefixPending()).toBe(true);
+  });
+
+  it("Ctrl+\\ via CSI u produces detach action", () => {
+    const write = vi.fn();
+    // CSI u: codepoint 92 (\), modifier 5 (Ctrl)
+    const actions = processInput(Buffer.from("\x1b[92;5u"), write);
+    expect(actions).toEqual([{ type: "detach" }]);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("Ctrl+] via CSI u cancels prefix when already in prefix mode", () => {
+    const write = vi.fn();
+    processInput(Buffer.from("\x1b[93;5u"), write); // enter prefix
+    expect(isPrefixPending()).toBe(true);
+
+    const actions = processInput(Buffer.from("\x1b[93;5u"), write); // cancel
+    expect(actions).toEqual([]);
+    expect(isPrefixPending()).toBe(false);
+  });
+
+  it("Ctrl+] via CSI u followed by command key works", () => {
+    const write = vi.fn();
+    processInput(Buffer.from("\x1b[93;5u"), write); // enter prefix
+    expect(isPrefixPending()).toBe(true);
+
+    const actions = processInput(Buffer.from("l"), write); // cycleLayout
+    expect(actions).toEqual([{ type: "cycleLayout" }]);
+  });
+
+  it("CSI u with higher flags (e.g. 7) still detects Ctrl", () => {
+    const write = vi.fn();
+    // modifier 7 = Ctrl+Alt (bitmask: shift=0, alt=1, ctrl=1 → 1+2+4=7)
+    const actions = processInput(Buffer.from("\x1b[93;7u"), write);
+    expect(isPrefixPending()).toBe(true);
+  });
+
+  it("non-keybinding CSI u sequences are forwarded", () => {
+    const write = vi.fn();
+    // Ctrl+A (codepoint 97, modifier 5) — not our keybinding
+    const actions = processInput(Buffer.from("\x1b[97;5u"), write);
+    expect(actions).toEqual([]);
+    expect(write).toHaveBeenCalled(); // forwarded
+  });
+});
+
 describe("Ctrl+] prefix key", () => {
   it("enters prefix mode when alone in buffer", () => {
     const write = vi.fn();

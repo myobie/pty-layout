@@ -1,6 +1,7 @@
 import { listSessions } from "@myobie/pty/tui";
 import { spawn } from "node:child_process";
 import { type TagFilter, matchesTags } from "./tag-subscription.ts";
+import { fuzzyMatch } from "./fuzzy.ts";
 
 export interface PickerItem {
   type: "create-local" | "create-remote" | "local" | "remote";
@@ -8,6 +9,11 @@ export interface PickerItem {
   detail?: string;
   sessionName?: string;
   relayUrl?: string;
+  /** For scoring: name, cwd, command as separate fields */
+  name?: string;
+  cwd?: string;
+  command?: string;
+  running?: boolean;
 }
 
 export interface PickerGroup {
@@ -16,18 +22,29 @@ export interface PickerGroup {
 }
 
 export interface PickerState {
-  allGroups: PickerGroup[];     // unfiltered
-  groups: PickerGroup[];        // filtered
+  allGroups: PickerGroup[];     // unfiltered (sessions only, no create items)
+  relayHosts: RelayHost[];      // stored for host filtering
+  localSessions: SessionData[]; // stored for rebuilding
+  tagFilters: TagFilter[];      // stored for rebuilding
+  groups: PickerGroup[];        // filtered + create items added back
   flatItems: PickerItem[];      // flattened filtered items
   selectedIndex: number;
   filter: string;
   loading: boolean;
 }
 
+interface SessionData {
+  name: string;
+  status: string;
+  command?: string;
+  cwd?: string;
+  tags?: Record<string, string>;
+}
+
 interface RelayHost {
   label: string;
   url: string;
-  sessions: { name: string; status: string; command?: string; cwd?: string; tags?: Record<string, string> }[];
+  sessions: SessionData[];
   spawn_enabled: boolean;
   error: string | null;
 }
@@ -35,6 +52,9 @@ interface RelayHost {
 export function createPickerState(): PickerState {
   return {
     allGroups: [],
+    relayHosts: [],
+    localSessions: [],
+    tagFilters: [],
     groups: [],
     flatItems: [],
     selectedIndex: 0,
@@ -52,35 +72,112 @@ export function autoSessionName(existingNames: Set<string>): string {
   }
 }
 
-function fuzzyMatch(text: string, pattern: string): boolean {
-  if (pattern.length === 0) return true;
-  const lower = text.toLowerCase();
-  const lowerPattern = pattern.toLowerCase();
-  let pi = 0;
-  for (let i = 0; i < lower.length && pi < lowerPattern.length; i++) {
-    if (lower[i] === lowerPattern[pi]) pi++;
+/** Score and sort session items by fuzzy match — same logic as pty's filterAndSort. */
+function filterAndSort(filter: string, items: PickerItem[]): PickerItem[] {
+  if (!filter) return items;
+  const matches: { item: PickerItem; score: number }[] = [];
+  for (const item of items) {
+    // Skip create items during filter
+    if (item.type === "create-local" || item.type === "create-remote") continue;
+
+    const name = item.name ?? item.label;
+    const cwd = item.cwd ?? "";
+    const cmd = item.command ?? "";
+
+    const nameResult = fuzzyMatch(filter, name);
+    const cwdResult = fuzzyMatch(filter, cwd);
+    const cmdResult = fuzzyMatch(filter, cmd);
+    if (!nameResult.match && !cwdResult.match && !cmdResult.match) continue;
+
+    const runningBonus = item.running ? 100000 : 0;
+    const score = runningBonus + Math.max(
+      nameResult.match ? nameResult.score + 10000 : 0,
+      cwdResult.match ? cwdResult.score : 0,
+      cmdResult.match ? cmdResult.score : 0,
+    );
+    matches.push({ item, score });
   }
-  return pi === lowerPattern.length;
+  matches.sort((a, b) => b.score - a.score);
+  return matches.map((m) => m.item);
 }
 
-function itemMatchesFilter(item: PickerItem, filter: string): boolean {
-  if (filter.length === 0) return true;
-  if (item.type === "create-local" || item.type === "create-remote") {
-    // Only match on "new", not the full label text
-    return fuzzyMatch("new", filter);
+/** Build filtered groups — matches pty's buildFilteredGroups logic. */
+function buildFilteredGroups(
+  filter: string,
+  localSessions: SessionData[],
+  relayHosts: RelayHost[],
+  tagFilters: TagFilter[],
+): { groups: PickerGroup[]; flatItems: PickerItem[] } {
+  // Parse "host/session" filter syntax
+  let hostFilter = "";
+  let sessionFilter = filter;
+  if (filter.includes("/")) {
+    const slashIdx = filter.indexOf("/");
+    hostFilter = filter.slice(0, slashIdx).trim();
+    sessionFilter = filter.slice(slashIdx + 1).trim();
   }
-  return fuzzyMatch(item.label, filter) || fuzzyMatch(item.detail ?? "", filter);
-}
 
-function applyFilter(allGroups: PickerGroup[], filter: string): { groups: PickerGroup[]; flatItems: PickerItem[] } {
+  const showCreate = !filter || "new".startsWith(filter.toLowerCase());
   const groups: PickerGroup[] = [];
   const flatItems: PickerItem[] = [];
 
-  for (const group of allGroups) {
-    const filtered = group.items.filter((item) => itemMatchesFilter(item, filter));
-    if (filtered.length > 0) {
-      groups.push({ title: group.title, items: filtered });
-      flatItems.push(...filtered);
+  // Local group — skip if host filter doesn't match "local"
+  if (!hostFilter || fuzzyMatch(hostFilter, "local").match) {
+    const localItems: PickerItem[] = [];
+    for (const s of localSessions) {
+      if (s.status !== "running") continue;
+      if (tagFilters.length > 0 && !matchesTags(tagFilters, s.tags)) continue;
+      localItems.push({
+        type: "local",
+        label: s.name,
+        detail: [s.cwd, s.command].filter(Boolean).join("  "),
+        sessionName: s.name,
+        name: s.name,
+        cwd: s.cwd,
+        command: s.command,
+        running: s.status === "running",
+      });
+    }
+
+    const filtered = sessionFilter ? filterAndSort(sessionFilter, localItems) : localItems;
+    const createItem: PickerItem = { type: "create-local", label: "+ New session" };
+    const items = showCreate ? [createItem, ...filtered] : filtered;
+    if (items.length > 0) {
+      groups.push({ title: "Local", items });
+      flatItems.push(...items);
+    }
+  }
+
+  // Remote groups
+  for (const host of relayHosts) {
+    if (host.error) continue;
+    if (hostFilter && !fuzzyMatch(hostFilter, host.label).match) continue;
+
+    const remoteItems: PickerItem[] = [];
+    for (const s of host.sessions) {
+      if (s.status !== "running") continue;
+      if (tagFilters.length > 0 && !matchesTags(tagFilters, s.tags)) continue;
+      remoteItems.push({
+        type: "remote",
+        label: s.name,
+        detail: [s.cwd, s.command].filter(Boolean).join("  "),
+        sessionName: s.name,
+        relayUrl: host.url,
+        name: s.name,
+        cwd: s.cwd,
+        command: s.command,
+        running: s.status === "running",
+      });
+    }
+
+    const filtered = sessionFilter ? filterAndSort(sessionFilter, remoteItems) : remoteItems;
+    const items: PickerItem[] = [...filtered];
+    if (host.spawn_enabled && showCreate) {
+      items.unshift({ type: "create-remote", label: "+ New session", relayUrl: host.url });
+    }
+    if (items.length > 0 || !filter) {
+      groups.push({ title: host.label, items });
+      flatItems.push(...items);
     }
   }
 
@@ -88,7 +185,9 @@ function applyFilter(allGroups: PickerGroup[], filter: string): { groups: Picker
 }
 
 export function filterPicker(state: PickerState, newFilter: string): PickerState {
-  const { groups, flatItems } = applyFilter(state.allGroups, newFilter);
+  const { groups, flatItems } = buildFilteredGroups(
+    newFilter, state.localSessions, state.relayHosts, state.tagFilters,
+  );
   return {
     ...state,
     filter: newFilter,
@@ -104,61 +203,13 @@ export function moveSelection(state: PickerState, delta: number): PickerState {
   return { ...state, selectedIndex: newIndex };
 }
 
-function buildGroups(
-  localSessions: { name: string; status: string; command?: string; cwd?: string; tags?: Record<string, string> }[],
-  relayHosts: RelayHost[],
-  tagFilters: TagFilter[],
-): PickerGroup[] {
-  const groups: PickerGroup[] = [];
-
-  // Local group
-  const localItems: PickerItem[] = [];
-  localItems.push({ type: "create-local", label: "+ New session" });
-  for (const s of localSessions) {
-    if (s.status !== "running") continue;
-    if (tagFilters.length > 0 && !matchesTags(tagFilters, s.tags)) continue;
-    localItems.push({
-      type: "local",
-      label: s.name,
-      detail: [s.cwd, s.command].filter(Boolean).join("  "),
-      sessionName: s.name,
-    });
-  }
-  groups.push({ title: "Local", items: localItems });
-
-  // Remote groups
-  for (const host of relayHosts) {
-    if (host.error) continue;
-    const items: PickerItem[] = [];
-    if (host.spawn_enabled) {
-      items.push({ type: "create-remote", label: "+ New session", relayUrl: host.url });
-    }
-    for (const s of host.sessions) {
-      if (s.status !== "running") continue;
-      if (tagFilters.length > 0 && !matchesTags(tagFilters, s.tags)) continue;
-      items.push({
-        type: "remote",
-        label: s.name,
-        detail: [s.cwd, s.command].filter(Boolean).join("  "),
-        sessionName: s.name,
-        relayUrl: host.url,
-      });
-    }
-    if (items.length > 0) {
-      groups.push({ title: host.label, items });
-    }
-  }
-
-  return groups;
-}
-
 export async function refreshPicker(
   tagFilters: TagFilter[],
   onUpdate: (state: PickerState) => void,
 ): Promise<void> {
   // Fetch local sessions immediately
   const sessions = await listSessions();
-  const localSessions = sessions.map((s) => ({
+  const localSessions: SessionData[] = sessions.map((s) => ({
     name: s.name,
     status: s.status,
     command: s.metadata?.displayCommand,
@@ -166,10 +217,12 @@ export async function refreshPicker(
     tags: s.metadata?.tags,
   }));
 
-  const localGroups = buildGroups(localSessions, [], tagFilters);
-  const { groups, flatItems } = applyFilter(localGroups, "");
+  const { groups, flatItems } = buildFilteredGroups("", localSessions, [], tagFilters);
   onUpdate({
-    allGroups: localGroups,
+    allGroups: [],
+    localSessions,
+    relayHosts: [],
+    tagFilters,
     groups,
     flatItems,
     selectedIndex: 0,
@@ -179,10 +232,12 @@ export async function refreshPicker(
 
   // Fetch relay hosts async
   const relayHosts = await fetchRelayHosts();
-  const allGroups = buildGroups(localSessions, relayHosts, tagFilters);
-  const filtered = applyFilter(allGroups, "");
+  const filtered = buildFilteredGroups("", localSessions, relayHosts, tagFilters);
   onUpdate({
-    allGroups,
+    allGroups: [],
+    localSessions,
+    relayHosts,
+    tagFilters,
     groups: filtered.groups,
     flatItems: filtered.flatItems,
     selectedIndex: 0,
