@@ -20,6 +20,8 @@ import {
   filterPicker,
   moveSelection,
   randomSessionId,
+  buildRemoteConnectUrl,
+  formatSessionLabel,
 } from "./session-picker.ts";
 import {
   type TagFilter,
@@ -351,9 +353,12 @@ async function selectPickerItem() {
         .filter((f) => f.value !== undefined)
         .flatMap((f) => ["--tag", `${f.key}=${f.value}`]);
       const name = `remote-${Date.now()}`;
-      const pane = createLocalPane("pty-relay", [
-        "connect", item.relayUrl!, "--spawn", name, ...tagArgs,
-      ]);
+      const title = item.hostLabel ? `@${item.hostLabel}/${name}` : `@${name}`;
+      const pane = createLocalPane(
+        "pty-relay",
+        ["connect", item.relayUrl!, "--spawn", name, ...tagArgs],
+        title,
+      );
       addPane(pane);
       break;
     }
@@ -369,9 +374,12 @@ async function selectPickerItem() {
       break;
     }
     case "remote": {
-      const pane = createLocalPane("pty-relay", [
-        "connect", `${item.relayUrl!}/${item.sessionName!}`,
-      ]);
+      const url = buildRemoteConnectUrl(item.relayUrl!, item.sessionName!);
+      const label = formatSessionLabel(item.sessionName!, item.sessionDisplayName);
+      const title = item.hostLabel
+        ? `@${item.hostLabel}/${label}`
+        : `@${label}`;
+      const pane = createLocalPane("pty-relay", ["connect", url], title);
       addPane(pane);
       break;
     }

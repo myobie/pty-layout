@@ -8,7 +8,9 @@ export interface PickerItem {
   label: string;
   detail?: string;
   sessionName?: string;
+  sessionDisplayName?: string;
   relayUrl?: string;
+  hostLabel?: string; // "local" or the relay host label
   /** For scoring: name, cwd, command as separate fields */
   name?: string;
   cwd?: string;
@@ -47,6 +49,18 @@ interface SessionData {
 export function formatSessionLabel(name: string, displayName?: string): string {
   if (!displayName || displayName === name) return name;
   return `${displayName} (${name})`;
+}
+
+/** Build a pty-relay connect URL for a specific remote session.
+ *  The base URL may have a fragment (secret) — session name must be
+ *  inserted BEFORE the fragment, not appended after. Mirrors pty's
+ *  interactive list logic so behavior stays consistent. */
+export function buildRemoteConnectUrl(baseUrl: string, sessionName: string): string {
+  const hashIdx = baseUrl.indexOf("#");
+  if (hashIdx === -1) return `${baseUrl}/${sessionName}`;
+  const before = baseUrl.slice(0, hashIdx);
+  const after = baseUrl.slice(hashIdx); // includes the '#'
+  return `${before}/${sessionName}${after}`;
 }
 
 interface RelayHost {
@@ -142,6 +156,8 @@ function buildFilteredGroups(
         label: formatSessionLabel(s.name, s.displayName),
         detail: [s.cwd, s.command].filter(Boolean).join("  "),
         sessionName: s.name,
+        sessionDisplayName: s.displayName,
+        hostLabel: "local",
         // name is used for fuzzy search — include both displayName and name
         name: s.displayName ? `${s.displayName} ${s.name}` : s.name,
         cwd: s.cwd,
@@ -173,7 +189,9 @@ function buildFilteredGroups(
         label: formatSessionLabel(s.name, s.displayName),
         detail: [s.cwd, s.command].filter(Boolean).join("  "),
         sessionName: s.name,
+        sessionDisplayName: s.displayName,
         relayUrl: host.url,
+        hostLabel: host.label,
         name: s.displayName ? `${s.displayName} ${s.name}` : s.name,
         cwd: s.cwd,
         command: s.command,
@@ -184,7 +202,7 @@ function buildFilteredGroups(
     const filtered = sessionFilter ? filterAndSort(sessionFilter, remoteItems) : remoteItems;
     const items: PickerItem[] = [...filtered];
     if (host.spawn_enabled && showCreate) {
-      items.unshift({ type: "create-remote", label: "+ New session", relayUrl: host.url });
+      items.unshift({ type: "create-remote", label: "+ New session", relayUrl: host.url, hostLabel: host.label });
     }
     if (items.length > 0 || !filter) {
       groups.push({ title: host.label, items });

@@ -61,13 +61,14 @@ export async function createAttachPane(name: string): Promise<Pane> {
  * Spawn a local child process (dies when layout exits).
  * Used for the pty interactive UI and CLI-arg commands.
  */
-export function createLocalPane(command: string, args: string[]): Pane {
+export function createLocalPane(command: string, args: string[], titleOverride?: string): Pane {
   const handle = createPty(command, args, { cols: 80, rows: 24, scrollback: 10000 });
   const basename = command.split("/").pop() ?? command;
+  const title = titleOverride ?? (args.length > 0 ? `${basename} ${args.join(" ")}` : basename);
   return {
     id: nextId++,
     handle,
-    title: args.length > 0 ? `${basename} ${args.join(" ")}` : basename,
+    title,
     source: { type: "local", command, args },
   };
 }
