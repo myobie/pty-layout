@@ -247,7 +247,7 @@ const OVERLAY_BG: [number, number, number] = [30, 30, 30];
 const OVERLAY_FG: [number, number, number] = [200, 200, 200];
 const OVERLAY_KEY: [number, number, number] = [80, 200, 120];
 
-function renderPrefixOverlay(
+export function renderPrefixOverlay(
   buf: CellBuffer,
   totalRows: number,
   totalCols: number,

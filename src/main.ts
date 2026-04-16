@@ -2,7 +2,7 @@
 import { hideCursor, showCursor, reset } from "@myobie/pty/tui";
 import { calculateLayout, nextLayoutMode, type LayoutMode, type PaneRect } from "./layout.ts";
 import { createSessionPane, createAttachPane, createLocalPane, closePane, defaultShell, type Pane } from "./pane.ts";
-import { renderFrame, clearCellCache, renderSessionPicker } from "./render.ts";
+import { renderFrame, clearCellCache, renderSessionPicker, renderPrefixOverlay } from "./render.ts";
 import { processInput, isPrefixPending } from "./keys.ts";
 import {
   type SelectionState,
@@ -696,9 +696,15 @@ function handleStdin(data: Buffer) {
       }
 
       case "detach":
-        // Ctrl+\ detaches from focused pane (same as close)
-        if (tagMode) break; // Can't close in tag mode
-        removeFocusedPane();
+        // Ctrl+\ detaches from the focused pane. With no panes in non-tag
+        // mode, there's nothing to detach from — interpret as quit.
+        if (tagMode) break;
+        if (panes.length === 0) {
+          detach();
+          process.exit(0);
+        } else {
+          removeFocusedPane();
+        }
         break;
 
       case "quit":
@@ -777,6 +783,9 @@ function renderEmptyState(totalRows: number, totalCols: number): void {
   // Session picker overlay
   if (showingSessionPicker && pickerState) {
     renderSessionPicker(buf, pickerState, totalRows, totalCols);
+  } else if (isPrefixPending()) {
+    // Prefix overlay in the empty state — so ^] shows the help modal
+    renderPrefixOverlay(buf, totalRows, totalCols);
   }
 
   process.stdout.write(fullRender(buf));

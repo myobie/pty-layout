@@ -327,6 +327,32 @@ describe("session picker", () => {
     await session.waitForAbsent("^] n to open", 5000);
   }, 20000);
 
+  it("^] from empty state shows the prefix help overlay", async () => {
+    startApp();
+    await session.waitForText("Sessions", 15000);
+
+    // Close picker → empty state
+    session.sendKeys("\x1b");
+    await session.waitForText("^] n to open session picker", 5000);
+
+    // Ctrl+] alone should show the help overlay
+    session.sendKeys("\x1d");
+    await session.waitForText("prev pane", 5000);
+  }, 20000);
+
+  it("^\\ from empty state quits the app", async () => {
+    startApp();
+    await session.waitForText("Sessions", 15000);
+
+    // Close picker → empty state with no panes
+    session.sendKeys("\x1b");
+    await session.waitForText("^] n to open session picker", 5000);
+
+    // Ctrl+\ should quit (nothing to detach from)
+    session.sendKeys("\x1c");
+    await session.waitForAbsent("^] n to open", 5000);
+  }, 20000);
+
   it("Enter with empty filter result does not crash", async () => {
     startApp(["bash"]);
     await session.waitForText("1/1", 15000);
