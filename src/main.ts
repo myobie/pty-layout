@@ -130,10 +130,8 @@ function doRender() {
   syncModesToTerminal();
 
   if (panes.length === 0) {
-    if (showingSessionPicker || tagMode) {
-      const [totalRows, totalCols] = getSize();
-      renderEmptyState(totalRows, totalCols);
-    }
+    const [totalRows, totalCols] = getSize();
+    renderEmptyState(totalRows, totalCols);
     return;
   }
 
@@ -202,8 +200,8 @@ function removePane(pane: Pane) {
 
   if (panes.length === 0) {
     if (!tagMode && !showingSessionPicker) {
-      detach();
-      process.exit(0);
+      // Reopen the picker instead of exiting. Explicit quit is ^] q.
+      openSessionPicker();
       return;
     }
     prevBuffer = null;
@@ -231,8 +229,8 @@ function removeFocusedPane() {
 
   if (panes.length === 0) {
     if (!tagMode && !showingSessionPicker) {
-      detach();
-      process.exit(0);
+      // Reopen the picker instead of exiting. Explicit quit is ^] q.
+      openSessionPicker();
       return;
     }
     prevBuffer = null;
@@ -312,14 +310,6 @@ function openSessionPicker() {
 function closeSessionPicker() {
   showingSessionPicker = false;
   pickerState = null;
-
-  // If the picker was the only reason to be alive, quit
-  if (panes.length === 0 && !tagMode) {
-    detach();
-    process.exit(0);
-    return;
-  }
-
   prevBuffer = null;
   scheduleRender();
 }
@@ -368,9 +358,14 @@ async function selectPickerItem() {
       break;
     }
     case "local": {
-      const pane = await createAttachPane(item.sessionName!);
-      if (tagSubscription) tagSubscription.track(item.sessionName!);
-      addPane(pane);
+      try {
+        const pane = await createAttachPane(item.sessionName!);
+        if (tagSubscription) tagSubscription.track(item.sessionName!);
+        addPane(pane);
+      } catch (err) {
+        process.stderr.write(`pty-layout: failed to attach to ${item.sessionName}: ${(err as Error).message}\n`);
+        openSessionPicker();
+      }
       break;
     }
     case "remote": {
@@ -411,7 +406,7 @@ function handlePickerInput(data: Buffer) {
           continue;
         }
       }
-      // Bare Esc — close picker
+      // Bare Esc — close picker (user can ^] q to quit)
       closeSessionPicker();
       i++;
       continue;
@@ -419,7 +414,10 @@ function handlePickerInput(data: Buffer) {
 
     // Enter — select
     if (code === 0x0d) {
-      selectPickerItem();
+      selectPickerItem().catch((err) => {
+        process.stderr.write(`pty-layout: picker selection failed: ${(err as Error).message}\n`);
+        openSessionPicker();
+      });
       return; // picker is closed, stop processing
     }
 
@@ -434,7 +432,7 @@ function handlePickerInput(data: Buffer) {
       continue;
     }
 
-    // Ctrl+C — close
+    // Ctrl+C — close picker
     if (code === 0x03) {
       closeSessionPicker();
       i++;
@@ -461,13 +459,17 @@ function handleStdin(data: Buffer) {
   }
 
   const focused = panes[focusedIndex];
-  if (!focused || focused.handle.exited) return;
-
   const wasPrefixed = isPrefixPending();
   expectingFocusedEcho = false;
+
+  // If there's a focused pane, non-command bytes forward to it.
+  // Otherwise drop them — but commands (Ctrl+], Ctrl+\) still work so the
+  // user can quit or open the picker from a bare empty state.
   const actions = processInput(data, (s) => {
-    focused.handle.write(s);
-    expectingFocusedEcho = true;
+    if (focused && !focused.handle.exited) {
+      focused.handle.write(s);
+      expectingFocusedEcho = true;
+    }
   });
 
   if (isPrefixPending() !== wasPrefixed) {

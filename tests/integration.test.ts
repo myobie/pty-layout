@@ -190,12 +190,12 @@ describe("detach and quit", () => {
     await session.waitForText("1/1", 5000);
   }, 20000);
 
-  it("Ctrl+\\ on last pane quits the layout", async () => {
+  it("Ctrl+\\ on last pane reopens the session picker", async () => {
     startApp(["bash"]);
     await session.waitForText("1/1", 15000);
     session.sendKeys("\x1c");
-    // App should exit when last pane is detached in non-tag mode
-    await session.waitForAbsent("^]", 5000);
+    // Last pane detached — picker should reopen (explicit quit is ^] q)
+    await session.waitForText("Sessions", 5000);
   }, 20000);
 
   it("^]q quits the layout", async () => {
@@ -212,6 +212,15 @@ describe("detach and quit", () => {
     session.type("exit\r");
     // Focused pane exits, layout drops to 1/1
     await session.waitForText("1/1", 10000);
+  }, 20000);
+
+  it("last pane exit reopens session picker (does not quit app)", async () => {
+    startApp(["bash"]);
+    await session.waitForText("1/1", 15000);
+    await new Promise((r) => setTimeout(r, 300));
+    session.type("exit\r");
+    // Instead of the app quitting, the picker should come back
+    await session.waitForText("Sessions", 10000);
   }, 20000);
 });
 
@@ -305,13 +314,17 @@ describe("stats logging", () => {
 });
 
 describe("session picker", () => {
-  it("Esc on startup picker with no panes quits the app", async () => {
+  it("Esc on startup picker closes it and shows the empty-state hint", async () => {
     startApp();
     await session.waitForText("Sessions", 15000);
 
-    // Press Esc — with zero panes and no tag mode, app should quit
+    // Esc closes the picker but the app stays alive — explicit quit is ^] q
     session.sendKeys("\x1b");
-    await session.waitForAbsent("Sessions", 5000);
+    await session.waitForText("^] n to open session picker", 5000);
+
+    // ^] q actually quits
+    session.sendKeys("\x1dq");
+    await session.waitForAbsent("^] n to open", 5000);
   }, 20000);
 
   it("Enter with empty filter result does not crash", async () => {
@@ -336,6 +349,25 @@ describe("session picker", () => {
     // Esc closes it
     session.sendKeys("\x1b");
     await session.waitForAbsent("Sessions", 5000);
+  }, 20000);
+
+  it("picking an existing daemon session attaches and shows the pane", async () => {
+    // Spawn a daemon session directly, then pick it from the picker
+    const name = `pick-target-${Date.now()}`;
+    await spawnDaemon({ name, command: "bash", args: [], displayCommand: "bash" });
+    await new Promise((r) => setTimeout(r, 500));
+
+    startApp();
+    await session.waitForText("Sessions", 15000);
+    // Filter to just our target and press Enter
+    session.type(name);
+    await new Promise((r) => setTimeout(r, 300));
+    session.sendKeys("\r");
+
+    // Pane should appear with count 1/1 — app should NOT exit
+    await session.waitForText("1/1", 10000);
+    const ss = session.screenshot();
+    expect(ss.text).toContain(name);
   }, 20000);
 
   it("^]n opens session picker overlay", async () => {
