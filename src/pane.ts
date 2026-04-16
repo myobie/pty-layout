@@ -1,4 +1,4 @@
-import { createPty, attachPty, spawnDaemon, type PtyHandle } from "@myobie/pty/tui";
+import { createPty, attachPty, spawnDaemon, getSession, type PtyHandle } from "@myobie/pty/tui";
 
 export interface Pane {
   id: number;
@@ -40,10 +40,19 @@ export async function createSessionPane(
  */
 export async function createAttachPane(name: string): Promise<Pane> {
   const handle = await attachPty(name, { cols: 80, rows: 24, scrollback: 10000 });
+  // Prefer displayName for the title; fall back to name
+  let title = `@${name}`;
+  try {
+    const info = await getSession(name);
+    const displayName = info?.metadata?.displayName;
+    if (displayName && displayName !== name) {
+      title = `@${displayName} (${name})`;
+    }
+  } catch {}
   return {
     id: nextId++,
     handle,
-    title: `@${name}`,
+    title,
     source: { type: "session", name },
   };
 }

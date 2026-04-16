@@ -19,7 +19,7 @@ import {
   refreshPicker,
   filterPicker,
   moveSelection,
-  autoSessionName,
+  randomSessionId,
 } from "./session-picker.ts";
 import {
   type TagFilter,
@@ -336,10 +336,18 @@ async function selectPickerItem() {
       const tags = tagMode
         ? Object.fromEntries(tagFilters.filter((f) => f.value !== undefined).map((f) => [f.key, f.value!]))
         : undefined;
-      const existingNames = new Set(panes.map((p) => p.source.type === "session" ? p.source.name : ""));
-      const name = autoSessionName(existingNames);
+      const command = process.env.SHELL ?? "bash";
+      const cwd = process.env.HOME ?? process.cwd();
+      const name = randomSessionId();
       try {
-        await spawnDaemon({ name, command: defaultShell(), args: [], displayCommand: defaultShell(), tags });
+        await spawnDaemon({
+          name,
+          command,
+          args: [],
+          displayCommand: command,
+          cwd,
+          tags,
+        });
         if (!tagMode) {
           const pane = await createAttachPane(name);
           addPane(pane);

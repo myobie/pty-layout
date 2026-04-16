@@ -35,10 +35,18 @@ export interface PickerState {
 
 interface SessionData {
   name: string;
+  displayName?: string;
   status: string;
   command?: string;
   cwd?: string;
   tags?: Record<string, string>;
+}
+
+/** Format a session label: prefer displayName, fall back to name.
+ *  Show name in parens when both are set and differ. */
+export function formatSessionLabel(name: string, displayName?: string): string {
+  if (!displayName || displayName === name) return name;
+  return `${displayName} (${name})`;
 }
 
 interface RelayHost {
@@ -63,13 +71,15 @@ export function createPickerState(): PickerState {
   };
 }
 
-export function autoSessionName(existingNames: Set<string>): string {
-  const base = `layout-shell-${Date.now()}`;
-  if (!existingNames.has(base)) return base;
-  for (let i = 2; ; i++) {
-    const candidate = `${base}-${i}`;
-    if (!existingNames.has(candidate)) return candidate;
+/** Generate a random 8-char lowercase alphanumeric session id, matching
+ *  pty's interactive "Create new session" format. */
+export function randomSessionId(): string {
+  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+  let out = "";
+  for (let i = 0; i < 8; i++) {
+    out += chars[Math.floor(Math.random() * chars.length)];
   }
+  return out;
 }
 
 /** Score and sort session items by fuzzy match — same logic as pty's filterAndSort. */
@@ -129,10 +139,11 @@ function buildFilteredGroups(
       if (tagFilters.length > 0 && !matchesTags(tagFilters, s.tags)) continue;
       localItems.push({
         type: "local",
-        label: s.name,
+        label: formatSessionLabel(s.name, s.displayName),
         detail: [s.cwd, s.command].filter(Boolean).join("  "),
         sessionName: s.name,
-        name: s.name,
+        // name is used for fuzzy search — include both displayName and name
+        name: s.displayName ? `${s.displayName} ${s.name}` : s.name,
         cwd: s.cwd,
         command: s.command,
         running: s.status === "running",
@@ -159,11 +170,11 @@ function buildFilteredGroups(
       if (tagFilters.length > 0 && !matchesTags(tagFilters, s.tags)) continue;
       remoteItems.push({
         type: "remote",
-        label: s.name,
+        label: formatSessionLabel(s.name, s.displayName),
         detail: [s.cwd, s.command].filter(Boolean).join("  "),
         sessionName: s.name,
         relayUrl: host.url,
-        name: s.name,
+        name: s.displayName ? `${s.displayName} ${s.name}` : s.name,
         cwd: s.cwd,
         command: s.command,
         running: s.status === "running",
@@ -211,6 +222,7 @@ export async function refreshPicker(
   const sessions = await listSessions();
   const localSessions: SessionData[] = sessions.map((s) => ({
     name: s.name,
+    displayName: s.metadata?.displayName,
     status: s.status,
     command: s.metadata?.displayCommand,
     cwd: s.metadata?.cwd,
