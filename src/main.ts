@@ -30,6 +30,7 @@ import {
   formatTagFilters,
 } from "./tag-subscription.ts";
 import { startStats, newLaunchId } from "./stats.ts";
+import { adjustScrollOffset } from "./scroll.ts";
 
 const enterAltScreen = "\x1b[?1049h";
 const leaveAltScreen = "\x1b[?1049l";
@@ -48,6 +49,7 @@ let renderTimerDelay = 16;
 let running = false;
 let lastLayout: { paneIndex: number; rect: PaneRect }[] = [];
 let scrollOffsets: number[] = []; // per-pane scroll offset (0 = live viewport)
+let scrollLastBaseY: number[] = []; // per-pane snapshot of baseY for anchor math
 let selection: SelectionState | null = null;
 let tagSubscription: TagSubscription | null = null;
 let tagFilters: TagFilter[] = [];
@@ -141,6 +143,18 @@ function doRender() {
   const [totalRows, totalCols] = getSize();
   if (totalRows < 4 || totalCols < 4) return;
 
+  // Anchor scroll offsets: when baseY advances (new output), bump offsets
+  // so panes that are scrolled back stay pinned to the same absolute lines.
+  for (let i = 0; i < panes.length; i++) {
+    const pane = panes[i]!;
+    const adjusted = adjustScrollOffset(
+      { offset: scrollOffsets[i] ?? 0, lastBaseY: scrollLastBaseY[i] ?? 0 },
+      pane.handle.baseY,
+    );
+    scrollOffsets[i] = adjusted.offset;
+    scrollLastBaseY[i] = adjusted.lastBaseY;
+  }
+
   const rects = calculateLayout(
     layoutMode,
     panes.length,
@@ -189,6 +203,7 @@ function addPane(pane: Pane) {
   };
   panes.push(pane);
   scrollOffsets.push(0);
+  scrollLastBaseY.push(pane.handle.baseY);
   focusedIndex = panes.length - 1;
   prevBuffer = null;
   scheduleRender();
@@ -201,6 +216,7 @@ function removePane(pane: Pane) {
   closePane(pane);
   panes.splice(idx, 1);
   scrollOffsets.splice(idx, 1);
+  scrollLastBaseY.splice(idx, 1);
 
   if (panes.length === 0) {
     if (!tagMode && !showingSessionPicker) {
@@ -230,6 +246,7 @@ function removeFocusedPane() {
   closePane(pane);
   panes.splice(focusedIndex, 1);
   scrollOffsets.splice(focusedIndex, 1);
+  scrollLastBaseY.splice(focusedIndex, 1);
 
   if (panes.length === 0) {
     if (!tagMode && !showingSessionPicker) {
@@ -507,10 +524,13 @@ function handleStdin(data: Buffer) {
           if (targetIdx >= 0 && targetIdx < panes.length && targetIdx !== focusedIndex) {
             const pane = panes[focusedIndex]!;
             const offset = scrollOffsets[focusedIndex] ?? 0;
+            const lastBaseY = scrollLastBaseY[focusedIndex] ?? 0;
             panes.splice(focusedIndex, 1);
             scrollOffsets.splice(focusedIndex, 1);
+            scrollLastBaseY.splice(focusedIndex, 1);
             panes.splice(targetIdx, 0, pane);
             scrollOffsets.splice(targetIdx, 0, offset);
+            scrollLastBaseY.splice(targetIdx, 0, lastBaseY);
             focusedIndex = targetIdx;
             prevBuffer = null;
             scheduleRender();
@@ -721,6 +741,8 @@ function handleStdin(data: Buffer) {
           } else {
             scrollOffsets[scrollIdx] = Math.max(offset - 3, 0);
           }
+          // Snapshot baseY so future new output anchors correctly
+          scrollLastBaseY[scrollIdx] = scrollPane.handle.baseY;
           prevBuffer = null;
           scheduleRender();
         }
@@ -848,6 +870,7 @@ async function main() {
     };
     panes.push(pane);
     scrollOffsets.push(0);
+    scrollLastBaseY.push(pane.handle.baseY);
   }
 
   // Set up terminal
