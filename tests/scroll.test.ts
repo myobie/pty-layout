@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { adjustScrollOffset } from "../src/scroll.ts";
+import { adjustScrollOffset, effectiveCursorRow } from "../src/scroll.ts";
 
 describe("adjustScrollOffset", () => {
   it("stays at 0 when following live (offset=0)", () => {
@@ -48,5 +48,37 @@ describe("adjustScrollOffset", () => {
     // Anchor should still be at absolute line 90 (100-10)
     expect(afterAdvance.lastBaseY - afterAdvance.offset).toBe(90);
     expect(afterAdvance.offset).toBe(30);
+  });
+});
+
+describe("effectiveCursorRow", () => {
+  it("returns the bare cursor row when scroll is 0", () => {
+    expect(effectiveCursorRow(5, 0, 24)).toBe(5);
+    expect(effectiveCursorRow(0, 0, 24)).toBe(0);
+    expect(effectiveCursorRow(23, 0, 24)).toBe(23);
+  });
+
+  it("shifts the cursor DOWN by scrollOffset when user scrolls up", () => {
+    // cursor at row 5 in the live viewport; user scrolled up 3 lines
+    // → cursor is now 3 rows lower on screen
+    expect(effectiveCursorRow(5, 3, 24)).toBe(8);
+    expect(effectiveCursorRow(10, 5, 24)).toBe(15);
+  });
+
+  it("returns null when the cursor is scrolled off the bottom", () => {
+    // pane is 24 rows tall, cursor at live row 23, user scrolled 1 line
+    // → effective row 24, which is OFF-SCREEN
+    expect(effectiveCursorRow(23, 1, 24)).toBeNull();
+    expect(effectiveCursorRow(20, 10, 24)).toBeNull();
+  });
+
+  it("returns the boundary row exactly at innerHeight-1 (last visible)", () => {
+    expect(effectiveCursorRow(10, 13, 24)).toBe(23);
+  });
+
+  it("returns null for negative effective rows (defensive)", () => {
+    // Shouldn't happen normally — cursor is always in live viewport,
+    // scroll offset is always >= 0 — but guard anyway.
+    expect(effectiveCursorRow(0, -1, 24)).toBeNull();
   });
 });

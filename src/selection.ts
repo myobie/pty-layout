@@ -25,6 +25,28 @@ export function isSelected(row: number, col: number, sel: SelectionState): boole
   return true;
 }
 
+/** Check if a screen cell is part of a selection, translating the
+ *  selection's captured coordinates to the current scroll position.
+ *
+ *  Selections are captured in screen-local coords at the time of the
+ *  mousedown (along with the scroll offset in effect then). When the
+ *  user scrolls the pane afterwards, the highlight must follow the
+ *  selected content — NOT stay in the same on-screen position.
+ *
+ *  delta = current - captured. When user scrolls up (offset increases),
+ *  the selected content moves DOWN on screen by `delta` rows. So we
+ *  translate the current screen cell's row back by `-delta` before
+ *  checking against the captured bounds. */
+export function isSelectedAtScroll(
+  screenRow: number,
+  screenCol: number,
+  sel: SelectionState,
+  currentScrollOffset: number,
+): boolean {
+  const delta = currentScrollOffset - sel.scrollOffset;
+  return isSelected(screenRow - delta, screenCol, sel);
+}
+
 export function hasDragDistance(sel: SelectionState): boolean {
   return sel.startRow !== sel.endRow || sel.startCol !== sel.endCol;
 }

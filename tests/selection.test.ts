@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   isSelected,
+  isSelectedAtScroll,
   hasDragDistance,
   extractSelectedText,
   copyToClipboard,
@@ -9,8 +10,8 @@ import {
   type SelectionState,
 } from "../src/selection.ts";
 
-function sel(startRow: number, startCol: number, endRow: number, endCol: number): SelectionState {
-  return { paneId: 1, paneIndex: 0, scrollOffset: 0, startRow, startCol, endRow, endCol, active: false };
+function sel(startRow: number, startCol: number, endRow: number, endCol: number, scrollOffset = 0): SelectionState {
+  return { paneId: 1, paneIndex: 0, scrollOffset, startRow, startCol, endRow, endCol, active: false };
 }
 
 describe("isSelected", () => {
@@ -55,6 +56,51 @@ describe("isSelected", () => {
     expect(isSelected(3, 3, s)).toBe(true);
     expect(isSelected(3, 2, s)).toBe(false);
     expect(isSelected(3, 4, s)).toBe(false);
+  });
+});
+
+describe("isSelectedAtScroll", () => {
+  it("matches isSelected when scroll hasn't changed", () => {
+    const s = sel(5, 0, 10, 10, 0);
+    // Same scroll offset as captured → delta=0 → unchanged behavior
+    expect(isSelectedAtScroll(5, 5, s, 0)).toBe(true);
+    expect(isSelectedAtScroll(10, 5, s, 0)).toBe(true);
+    expect(isSelectedAtScroll(4, 5, s, 0)).toBe(false);
+    expect(isSelectedAtScroll(11, 5, s, 0)).toBe(false);
+  });
+
+  it("shifts highlight DOWN on screen when user scrolls up", () => {
+    // Selection captured at scrollOffset=0, rows 5-10.
+    // User scrolls up by 3 → the selected content (rows 5-10 in the old
+    // view) is now at screen rows 8-13 in the new view. Content at the
+    // original screen rows 5-10 is now different (older scrollback).
+    const s = sel(5, 0, 10, 10, 0);
+    expect(isSelectedAtScroll(8, 5, s, 3)).toBe(true);   // content was at row 5
+    expect(isSelectedAtScroll(13, 5, s, 3)).toBe(true);  // content was at row 10
+    expect(isSelectedAtScroll(7, 5, s, 3)).toBe(false);  // row above selected range
+    expect(isSelectedAtScroll(14, 5, s, 3)).toBe(false); // row below selected range
+    // Rows 5-10 on the new view = content that was at rows 2-7 on the
+    // old view. Row 2 was NOT selected; rows 5-7 were. So:
+    expect(isSelectedAtScroll(5, 5, s, 3)).toBe(false);  // row 2 content, unselected
+    expect(isSelectedAtScroll(10, 5, s, 3)).toBe(true);  // row 7 content, selected
+  });
+
+  it("shifts highlight UP on screen when user scrolls back toward live", () => {
+    // Selection captured while scrolled back at offset=5, rows 2-4.
+    // User scrolls DOWN to offset=0 (live) → delta=-5 → content moved UP 5 rows.
+    // A selection starting at screen row 2 (at offset=5) would now be at row -3 (off-screen).
+    const s = sel(2, 0, 4, 10, 5);
+    // The only visible selection would be for screen rows [-3..-1] which don't exist.
+    expect(isSelectedAtScroll(0, 5, s, 0)).toBe(false);
+    // But if the user scrolls back UP, selection becomes visible again
+    expect(isSelectedAtScroll(2, 5, s, 5)).toBe(true);
+  });
+
+  it("handles selection across very different scroll offsets", () => {
+    const s = sel(0, 0, 0, 10, 10);
+    // Captured at offset=10, row 0. At offset=20, it's at screen row 10.
+    expect(isSelectedAtScroll(10, 5, s, 20)).toBe(true);
+    expect(isSelectedAtScroll(0, 5, s, 20)).toBe(false);
   });
 });
 

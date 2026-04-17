@@ -548,6 +548,14 @@ function handleStdin(data: Buffer) {
     if (focused && !focused.handle.exited) {
       focused.handle.write(s);
       expectingFocusedEcho = true;
+      // User typed — snap the focused pane to the live viewport so they
+      // can see what they're typing. Only resets scroll for the focused
+      // pane; unfocused panes keep their scroll position.
+      if ((scrollOffsets[focusedIndex] ?? 0) > 0) {
+        scrollOffsets[focusedIndex] = 0;
+        scrollLastBaseY[focusedIndex] = focused.handle.baseY;
+        prevBuffer = null;
+      }
     }
   });
 
@@ -946,10 +954,23 @@ async function main() {
   process.stdin.resume();
   process.stdin.on("data", handleStdin);
 
-  // Handle resize
+  // Handle resize — debounce because resizing a terminal window often
+  // fires many events in quick succession (drag-to-resize), and each
+  // render during that window sees partially-stale PTY buffers (cells
+  // haven't finished reflowing yet). Rendering mid-flight causes a
+  // visible "flash of scrollback." Wait for the event stream to settle,
+  // then render once.
+  let resizeTimer: ReturnType<typeof setTimeout> | null = null;
   process.stdout.on("resize", () => {
+    // Blank the screen immediately so the user doesn't see stale frames
+    // while we wait. prevBuffer=null also forces a full re-render.
     prevBuffer = null;
-    scheduleRender();
+    if (resizeTimer !== null) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      resizeTimer = null;
+      prevBuffer = null;
+      scheduleRender(true);
+    }, 80);
   });
 
   // Handle signals

@@ -149,6 +149,30 @@ describe("input routing", () => {
     session.type("echo test-input-routing\r");
     await session.waitForText("test-input-routing", 10000);
   }, 20000);
+
+  it("typing while scrolled back snaps view to the live prompt", async () => {
+    startApp(["bash"]);
+    await session.waitForText("1/1", 15000);
+    await new Promise((r) => setTimeout(r, 500));
+
+    // Produce enough output to fill the scrollback
+    session.type("for i in $(seq 1 80); do echo SCROLL-LINE-$i; done\r");
+    await session.waitForText("SCROLL-LINE-80", 10000);
+    await new Promise((r) => setTimeout(r, 500));
+
+    // Scroll up via mouse wheel over the pane area
+    const scrollRow = 10;
+    const scrollCol = 10;
+    for (let i = 0; i < 20; i++) {
+      // SGR wheel-up at (col, row)
+      session.sendKeys(`\x1b[<64;${scrollCol};${scrollRow}M`);
+    }
+    await new Promise((r) => setTimeout(r, 300));
+
+    // Type a distinctive marker — user should now see it (view snapped to bottom)
+    session.type("echo POST-SCROLL-TYPING\r");
+    await session.waitForText("POST-SCROLL-TYPING", 10000);
+  }, 30000);
 });
 
 describe("pane management", () => {

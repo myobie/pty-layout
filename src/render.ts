@@ -13,9 +13,10 @@ import {
 } from "@myobie/pty/tui";
 import type { PaneRect, LayoutMode } from "./layout.ts";
 import type { Pane } from "./pane.ts";
-import { type SelectionState, isSelected, hasDragDistance } from "./selection.ts";
+import { type SelectionState, isSelectedAtScroll, hasDragDistance } from "./selection.ts";
 import type { PickerState } from "./session-picker.ts";
 import { indexToPositionKey } from "./positions.ts";
+import { effectiveCursorRow } from "./scroll.ts";
 
 type Cell = ReturnType<Pane["handle"]["readCells"]>[0][0];
 
@@ -116,7 +117,10 @@ export function renderFrame(
         });
       }
 
-      // Blit PTY cells into the buffer, applying selection highlight
+      // Blit PTY cells into the buffer, applying selection highlight.
+      // Selection coords were captured at selection.scrollOffset, so we
+      // use isSelectedAtScroll() to translate to the current scroll —
+      // the highlight tracks the selected content, not the screen position.
       const showSelection = selection
         && selection.paneIndex === paneIndex
         && hasDragDistance(selection);
@@ -127,7 +131,7 @@ export function renderFrame(
         for (let c = 0; c < row.length && c < rect.innerWidth; c++) {
           const cell = row[c];
           if (!cell) continue;
-          if (showSelection && isSelected(r, c, selection!)) {
+          if (showSelection && isSelectedAtScroll(r, c, selection!, scrollOffset)) {
             buf.setCell(rect.innerRow - 1 + r, rect.innerCol - 1 + c, {
               ...cell,
               fg: cell.bg ?? [0, 0, 0],
@@ -139,10 +143,15 @@ export function renderFrame(
         }
       }
 
-      // Track cursor for focused pane
+      // Track cursor for focused pane. If the user scrolled back far
+      // enough, the cursor's effective row ends up off-screen and we
+      // leave it hidden (cursorScreenRow stays -1).
       if (isFocused) {
-        cursorScreenRow = rect.innerRow + pane.handle.cursorRow;
-        cursorScreenCol = rect.innerCol + pane.handle.cursorCol;
+        const effective = effectiveCursorRow(pane.handle.cursorRow, scrollOffset, rect.innerHeight);
+        if (effective !== null) {
+          cursorScreenRow = rect.innerRow + effective;
+          cursorScreenCol = rect.innerCol + pane.handle.cursorCol;
+        }
       }
     }
 
