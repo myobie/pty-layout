@@ -238,16 +238,15 @@ export function processInput(
         continue;
       }
 
-      // Escape: cancel prefix
+      // Escape: cancel prefix. Always consume the ESC byte — never let
+      // it fall through to the focused pane, even when more bytes follow
+      // in the same read. The user's intent when hitting Esc in prefix
+      // mode is "dismiss the modal", not "send an escape sequence".
       if (code === 0x1b) {
         prefixPending = false;
-        if (i + 1 >= str.length) {
-          // Bare Escape: consume it
-          flush(i);
-          i++;
-          forwardStart = i;
-        }
-        // ESC + more bytes: don't consume, let the sequence forward
+        flush(i);
+        i++;
+        forwardStart = i;
         continue;
       }
 

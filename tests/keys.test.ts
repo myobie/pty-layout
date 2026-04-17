@@ -291,6 +291,21 @@ describe("prefix cancellation", () => {
     expect(isPrefixPending()).toBe(false);
     expect(write).not.toHaveBeenCalled();
   });
+
+  it("Escape never falls through to the pane, even with trailing bytes", () => {
+    const write = vi.fn();
+    processInput(Buffer.from("\x1d"), write);
+    expect(isPrefixPending()).toBe(true);
+
+    // ESC arriving with more bytes in the same read must NOT leak the ESC
+    // (or the whole sequence) to the focused pane.
+    const actions = processInput(Buffer.from("\x1b[A"), write);
+    expect(actions).toEqual([]);
+    expect(isPrefixPending()).toBe(false);
+    // Whatever gets forwarded, it must not include the ESC byte
+    const forwarded = write.mock.calls.map(c => c[0]).join("");
+    expect(forwarded).not.toContain("\x1b");
+  });
 });
 
 describe("prefix command map", () => {

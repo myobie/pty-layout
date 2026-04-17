@@ -19,12 +19,13 @@ export async function createSessionPane(
   command: string,
   args: string[],
   tags?: Record<string, string>,
+  env?: Record<string, string>,
 ): Promise<Pane> {
   const basename = command.split("/").pop() ?? command;
   const name = `layout-${basename}-${Date.now()}`;
   const displayCommand = args.length > 0 ? `${command} ${args.join(" ")}` : command;
 
-  await spawnDaemon({ name, command, args, displayCommand, tags });
+  await spawnDaemon({ name, command, args, displayCommand, tags, ...(env ? { env } : {}) });
   const handle = await attachPty(name, { cols: 80, rows: 24, scrollback: 10000 });
 
   return {
@@ -61,8 +62,18 @@ export async function createAttachPane(name: string): Promise<Pane> {
  * Spawn a local child process (dies when layout exits).
  * Used for the pty interactive UI and CLI-arg commands.
  */
-export function createLocalPane(command: string, args: string[], titleOverride?: string): Pane {
-  const handle = createPty(command, args, { cols: 80, rows: 24, scrollback: 10000 });
+export function createLocalPane(
+  command: string,
+  args: string[],
+  titleOverride?: string,
+  env?: Record<string, string>,
+): Pane {
+  const handle = createPty(command, args, {
+    cols: 80,
+    rows: 24,
+    scrollback: 10000,
+    ...(env ? { env } : {}),
+  });
   const basename = command.split("/").pop() ?? command;
   const title = titleOverride ?? (args.length > 0 ? `${basename} ${args.join(" ")}` : basename);
   return {

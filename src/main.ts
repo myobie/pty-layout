@@ -31,6 +31,14 @@ import {
 } from "./tag-subscription.ts";
 import { startStats, newLaunchId } from "./stats.ts";
 import { adjustScrollOffset } from "./scroll.ts";
+import { buildShimEnv } from "./shim-env.ts";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname_main = path.dirname(fileURLToPath(import.meta.url));
+function shimDir(): string {
+  return path.resolve(__dirname_main, "../shim");
+}
 
 const enterAltScreen = "\x1b[?1049h";
 const leaveAltScreen = "\x1b[?1049l";
@@ -54,6 +62,7 @@ let selection: SelectionState | null = null;
 let tagSubscription: TagSubscription | null = null;
 let tagFilters: TagFilter[] = [];
 let tagMode = false;
+let tmuxMode = false;
 let showingSessionPicker = false;
 let pickerState: PickerState | null = null;
 let moveMode = false; // true between ^] m and the position key that follows
@@ -184,6 +193,7 @@ function doRender() {
     selection,
     showingSessionPicker ? pickerState : null,
     moveMode,
+    tagMode,
   );
 
   process.stdout.write(output);
@@ -347,24 +357,66 @@ async function selectPickerItem() {
       const tags = tagMode
         ? Object.fromEntries(tagFilters.filter((f) => f.value !== undefined).map((f) => [f.key, f.value!]))
         : undefined;
-      const command = process.env.SHELL ?? "bash";
+      // Always use the user's $SHELL. Fall back to /bin/bash only when
+      // it's unset (rare). Never hardcode /bin/bash over $SHELL — Apple's
+      // /bin/bash 3.2.57 fails to load modern bash_completion, so Homebrew
+      // bash 5.x users at /opt/homebrew/bin/bash would silently lose
+      // __git_ps1 and similar helpers.
+      const userShell = (process.env.SHELL && process.env.SHELL.length > 0)
+        ? process.env.SHELL
+        : "/bin/bash";
       const cwd = process.env.HOME ?? process.cwd();
       const name = randomSessionId();
+
+      // In --tmux mode we need the shim dir to beat the user's rc
+      // reorderings of PATH (brew shellenv etc.). The bash function
+      // trick only works for shell-mediated invocations — tools that
+      // use execvp directly (like Claude Code's tmux spawner) hit PATH
+      // lookup instead. Fix: spawn the shell with rcfile/ZDOTDIR that
+      // re-prepends PATH AFTER the user's normal rc runs.
+      //
+      // Per-shell strategy:
+      //   bash → --rcfile <wrapper> (sources user's .bashrc then fixes PATH)
+      //   zsh  → ZDOTDIR=<shim>/shell-init (wrapper .zshrc does the same)
+      //   fish → spawn directly; PATH from buildShimEnv is our best shot.
+      //          Fish has no --rcfile/ZDOTDIR equivalent. If user's
+      //          config.fish re-prepends to PATH, they need to add a
+      //          one-liner to config.fish. Documented in agent-teams.md.
+      //   other → spawn directly, rely on PATH from buildShimEnv.
+      let command = userShell;
+      let shellArgs: string[] = [];
+      let env: Record<string, string> | undefined;
+      if (tmuxMode) {
+        const shellInit = path.join(shimDir(), "shell-init");
+        env = buildShimEnv(tagFilters, shimDir(), process.env, name);
+        const shellBase = path.basename(userShell);
+        if (shellBase === "zsh") {
+          env.ZDOTDIR = shellInit;
+        } else if (shellBase === "bash") {
+          shellArgs = ["--rcfile", path.join(shellInit, "bashrc"), "-i"];
+        }
+        // fish and unknown shells: no wrapper, just $SHELL with env
+      }
+
       try {
         await spawnDaemon({
           name,
           command,
-          args: [],
-          displayCommand: command,
+          args: shellArgs,
+          displayCommand: userShell,
           cwd,
           tags,
+          ...(env ? { env } : {}),
         });
         if (!tagMode) {
           const pane = await createAttachPane(name);
           addPane(pane);
         }
         // In tag mode, EventFollower handles add
-      } catch {}
+      } catch (err) {
+        process.stderr.write(`pty-layout: failed to create session: ${(err as Error).message}\n`);
+        openSessionPicker();
+      }
       break;
     }
     case "create-remote": {
@@ -779,17 +831,22 @@ type PaneSpec =
 interface ParsedArgs {
   specs: PaneSpec[];
   tagFilters: TagFilter[];
+  tmux: boolean;
 }
 
-function parseArgs(argv: string[]): ParsedArgs {
+export function parseArgs(argv: string[]): ParsedArgs {
   const specs: PaneSpec[] = [];
   const filters: TagFilter[] = [];
+  let tmux = false;
 
   let i = 0;
   while (i < argv.length) {
     if (argv[i] === "--tag" && i + 1 < argv.length) {
       filters.push(parseTagFilter(argv[i + 1]!));
       i += 2;
+    } else if (argv[i] === "--tmux") {
+      tmux = true;
+      i++;
     } else {
       const arg = argv[i]!;
       if (arg.startsWith("@")) {
@@ -802,7 +859,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     }
   }
 
-  return { specs, tagFilters: filters };
+  return { specs, tagFilters: filters, tmux };
 }
 
 // --- Empty tag state ---
@@ -839,7 +896,7 @@ function renderEmptyState(totalRows: number, totalCols: number): void {
     renderSessionPicker(buf, pickerState, totalRows, totalCols);
   } else if (isPrefixPending()) {
     // Prefix overlay in the empty state — so ^] shows the help modal
-    renderPrefixOverlay(buf, totalRows, totalCols);
+    renderPrefixOverlay(buf, totalRows, totalCols, false, tagMode);
   }
 
   process.stdout.write(fullRender(buf));
@@ -850,6 +907,13 @@ function renderEmptyState(totalRows: number, totalCols: number): void {
 async function main() {
   const parsed = parseArgs(process.argv.slice(2));
   tagFilters = parsed.tagFilters;
+  tmuxMode = parsed.tmux;
+  // --tmux without --tag: auto-generate a unique tag so the shim's
+  // spawn-path (split-window, list-panes, etc.) has something to scope
+  // sessions to. Without this, the shim would error on every spawn.
+  if (tmuxMode && tagFilters.length === 0) {
+    tagFilters = [{ key: "tmux", value: randomSessionId() }];
+  }
   tagMode = tagFilters.length > 0;
 
   // Create initial panes from explicit specs

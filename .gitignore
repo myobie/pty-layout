@@ -1,3 +1,7 @@
 node_modules/
 pty.toml
 .claude-session-id
+# Runtime-only files zsh writes to ZDOTDIR=shim/shell-init when we spawn it
+shim/shell-init/.zsh_history
+shim/shell-init/.zsh_sessions/
+shim/shell-init/.zcompdump*

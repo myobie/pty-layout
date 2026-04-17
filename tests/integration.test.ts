@@ -1,11 +1,15 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach, afterAll } from "vitest";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import { Session } from "@myobie/pty/testing";
-import { spawnDaemon } from "@myobie/pty/client";
+import { spawnDaemon, listSessions } from "@myobie/pty/client";
 
 const mainScript = path.resolve(import.meta.dirname, "../src/main.ts");
+
+/** Hard cap on concurrent test sessions. If exceeded we still clean up,
+ *  but fail loudly — it means a previous test leaked sessions. */
+const MAX_TEST_SESSIONS = 50;
 
 let session: Session;
 
@@ -25,6 +29,66 @@ function startApp(
   return session;
 }
 
+/** Kill every running session in the test PTY_SESSION_DIR. Non-optional:
+ *  we never leave test daemons running. Tries SIGTERM first, waits up to
+ *  5s for graceful exit, then escalates to SIGKILL. Polls until the dir
+ *  is empty or the timeout is hit. Scoped to the test dir only because
+ *  vitest.config.ts sets PTY_SESSION_DIR — listSessions() never sees
+ *  the user's real sessions. */
+async function killAllTestSessions(): Promise<void> {
+  const runningCount = async () =>
+    (await listSessions()).filter(s => s.status === "running" && s.pid).length;
+
+  // Phase 1: SIGTERM
+  let sessions = await listSessions();
+  for (const s of sessions) {
+    if (s.status === "running" && s.pid) {
+      try { process.kill(s.pid, "SIGTERM"); } catch {}
+    }
+  }
+  // Wait up to 5s for graceful shutdown
+  const softDeadline = Date.now() + 5000;
+  while (Date.now() < softDeadline) {
+    if (await runningCount() === 0) return;
+    await new Promise(r => setTimeout(r, 200));
+  }
+
+  // Phase 2: SIGKILL anything still alive
+  sessions = await listSessions();
+  for (const s of sessions) {
+    if (s.status === "running" && s.pid) {
+      try { process.kill(s.pid, "SIGKILL"); } catch {}
+    }
+  }
+  // Wait up to 2s for SIGKILL to land
+  const hardDeadline = Date.now() + 2000;
+  while (Date.now() < hardDeadline) {
+    if (await runningCount() === 0) return;
+    await new Promise(r => setTimeout(r, 200));
+  }
+
+  // If we get here, something is genuinely stuck
+  const stuck = await runningCount();
+  throw new Error(
+    `Test cleanup failed: ${stuck} session(s) survived SIGKILL in test PTY_SESSION_DIR. ` +
+    `This is a bug — a child process is refusing to die.`,
+  );
+}
+
+beforeEach(async () => {
+  // Canary: if we're already over the cap, something leaked. Clean up
+  // aggressively and fail this test so the leak gets noticed.
+  const running = (await listSessions()).filter(s => s.status === "running");
+  if (running.length >= MAX_TEST_SESSIONS) {
+    const count = running.length;
+    await killAllTestSessions();
+    throw new Error(
+      `Leak canary tripped: ${count} running sessions in test PTY_SESSION_DIR (>= ${MAX_TEST_SESSIONS}). ` +
+      `Previous tests did not clean up. Sessions have been killed.`,
+    );
+  }
+});
+
 afterEach(async () => {
   if (session) {
     try { session.sendKeys("\x1dq"); } catch {} // ^] q to quit
@@ -32,6 +96,13 @@ afterEach(async () => {
     await session.close();
     await new Promise((r) => setTimeout(r, 500));
   }
+});
+
+// Belt-and-suspenders: even if a test throws, the file-level afterAll
+// runs. Every session in the test PTY_SESSION_DIR dies when this file
+// completes, pass or fail.
+afterAll(async () => {
+  await killAllTestSessions();
 });
 
 /** Send Ctrl+] prefix key followed by a command character */
@@ -478,4 +549,152 @@ describe("text selection", () => {
     session.sendKeys(`\x1b[<0;${startCol};${startRow}m`);
     await new Promise(r => setTimeout(r, 200));
   }, 20000);
+});
+
+describe("tmux shim mode", () => {
+  const uniqueTag = () => `tmux-test-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+
+  afterEach(async () => {
+    // Kill all daemon sessions in the test PTY_SESSION_DIR left by the shim
+    await killAllTestSessions();
+    await new Promise(r => setTimeout(r, 300));
+  });
+
+  /** Open picker, select "+ New session", wait for pane to appear in tag mode. */
+  async function spawnShellViaPickerAndWait(tag: string) {
+    startApp(["--tmux", "--tag", `team=${tag}`]);
+    await session.waitForText("Watching for sessions tagged", 15000);
+    prefixKey("n");
+    await session.waitForText("Sessions", 5000);
+    session.sendKeys("\r");
+    await session.waitForText("1/1", 15000);
+    await new Promise(r => setTimeout(r, 1000));
+  }
+
+  it("--tmux sets TMUX, PTY_LAYOUT_FILTER_TAG, and bash tmux function", async () => {
+    const tag = uniqueTag();
+    await spawnShellViaPickerAndWait(tag);
+
+    session.type("echo TMUX_VAL=$TMUX\r");
+    await session.waitForText("TMUX_VAL=pty-layout", 5000);
+
+    session.type("echo FILTER_TAG=$PTY_LAYOUT_FILTER_TAG\r");
+    await session.waitForText(`FILTER_TAG=team=${tag}`, 5000);
+
+    // bash function should override PATH
+    session.type("type tmux\r");
+    await session.waitForText("function", 5000);
+
+    session.type("declare -f tmux\r");
+    await session.waitForText("/shim/tmux", 5000);
+  }, 40000);
+
+  it("without --tmux, TMUX is not set to pty-layout", async () => {
+    const tag = uniqueTag();
+    startApp(["--tag", `team=${tag}`]);
+    await session.waitForText("Watching for sessions tagged", 15000);
+
+    prefixKey("n");
+    await session.waitForText("Sessions", 5000);
+    session.sendKeys("\r");
+    await session.waitForText("1/1", 15000);
+    await new Promise(r => setTimeout(r, 500));
+
+    session.type("echo TMUX_CHECK=${TMUX:-unset}\r");
+    await session.waitForText("TMUX_CHECK=unset", 5000);
+  }, 30000);
+
+  it("tmux split-window spawns a new pane visible in the layout", async () => {
+    const tag = uniqueTag();
+    await spawnShellViaPickerAndWait(tag);
+
+    session.type("tmux split-window -- bash -c 'echo SHIM_SPLIT_OK; sleep 10'\r");
+    // The new session gets the same tag → TagSubscription picks it up → pane 2 appears
+    await session.waitFor(
+      (ss) => ss.text.includes("SHIM_SPLIT_OK") || ss.text.match(/\d\/2/) !== null,
+      15000,
+      "second pane or SHIM_SPLIT_OK",
+    );
+  }, 40000);
+
+  it("tmux split-window -P prints the pane id and send-keys delivers to it", async () => {
+    const tag = uniqueTag();
+    await spawnShellViaPickerAndWait(tag);
+
+    // -P prints %<session-id> to stdout
+    session.type("PANE_ID=$(tmux split-window -P -- bash -c 'sleep 10') && echo GOT_ID=$PANE_ID\r");
+    await session.waitForText("GOT_ID=%", 15000);
+
+    // Wait for pane 2 to appear
+    await session.waitFor(
+      (ss) => ss.text.match(/\d\/2/) !== null,
+      10000,
+      "2-pane status",
+    );
+    await new Promise(r => setTimeout(r, 1000));
+
+    // Send keys to the second pane
+    session.type("tmux send-keys -t $PANE_ID 'echo REMOTE_MSG' Enter\r");
+    await session.waitForText("REMOTE_MSG", 10000);
+  }, 50000);
+
+  it("tmux list-panes lists running sessions with matching tags", async () => {
+    const tag = uniqueTag();
+    await spawnShellViaPickerAndWait(tag);
+
+    session.type("tmux split-window -- bash -c 'echo PANE2_UP; sleep 10'\r");
+    await session.waitFor(
+      (ss) => ss.text.includes("PANE2_UP") || ss.text.match(/\d\/2/) !== null,
+      15000,
+      "second pane visible",
+    );
+    await new Promise(r => setTimeout(r, 1000));
+
+    // Focus pane 1 where we can type the list command
+    prefixKey("1");
+    await new Promise(r => setTimeout(r, 300));
+    session.type("tmux list-panes\r");
+    await session.waitFor(
+      (ss) => {
+        const matches = ss.text.match(/%[a-z0-9]{8}/g);
+        return matches !== null && matches.length >= 2;
+      },
+      10000,
+      "at least 2 pane ids in list-panes output",
+    );
+  }, 50000);
+
+  it("tmux kill-pane removes a session from the layout", async () => {
+    const tag = uniqueTag();
+    await spawnShellViaPickerAndWait(tag);
+
+    session.type("PANE_ID=$(tmux split-window -P -- bash -c 'sleep 10') && echo KILL_TARGET=$PANE_ID\r");
+    await session.waitForText("KILL_TARGET=%", 15000);
+    await session.waitFor(
+      (ss) => ss.text.match(/\d\/2/) !== null,
+      10000,
+      "2-pane status",
+    );
+    await new Promise(r => setTimeout(r, 1000));
+
+    session.type("tmux kill-pane -t $PANE_ID\r");
+    await session.waitForText("1/1", 15000);
+  }, 50000);
+
+  it("tmux display-message and has-session work", async () => {
+    const tag = uniqueTag();
+    await spawnShellViaPickerAndWait(tag);
+
+    // display-message -p prints the pane id
+    session.type("tmux display-message -p '#{pane_id}'\r");
+    await session.waitFor(
+      (ss) => ss.text.match(/%[a-z0-9]/) !== null,
+      5000,
+      "pane id from display-message",
+    );
+
+    // has-session returns 0
+    session.type("tmux has-session && echo HAS_OK\r");
+    await session.waitForText("HAS_OK", 5000);
+  }, 30000);
 });

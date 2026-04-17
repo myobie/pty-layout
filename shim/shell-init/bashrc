@@ -1,0 +1,12 @@
+# pty-layout bash init wrapper. Used via `bash --rcfile <this file> -i`
+# only when --tmux mode is active. Sources the user's normal bashrc, then
+# forcibly re-prepends PTY_LAYOUT_SHIM_DIR to PATH so the tmux shim wins
+# over any real tmux binary. This MUST run after the user's rc, because
+# things like `brew shellenv` prepend /opt/homebrew/bin to PATH and would
+# push our shim behind a real tmux.
+
+[[ -f "$HOME/.bashrc" ]] && source "$HOME/.bashrc"
+
+if [[ -n "${PTY_LAYOUT_SHIM_DIR:-}" ]]; then
+  export PATH="$PTY_LAYOUT_SHIM_DIR:$PATH"
+fi

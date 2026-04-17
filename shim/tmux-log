@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# pty-layout tmux-log shim — logs every call before delegating to the real
+# shim. Swap this in for `tmux` on PATH during discovery runs to capture
+# the exact argv/env surface a tool is using. Set $TMUX_SHIM_LOG to
+# override the log path (default /tmp/pty-layout-tmux-shim.log).
+SHIM_DIR="$(cd "$(dirname "$0")" && pwd)"
+exec node --experimental-strip-types --no-warnings "$SHIM_DIR/tmux-log-main.ts" "$@"

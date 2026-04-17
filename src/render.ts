@@ -51,6 +51,7 @@ export function renderFrame(
   selection?: SelectionState | null,
   sessionPicker?: PickerState | null,
   moveMode: boolean = false,
+  tagMode: boolean = false,
 ): { output: string; buffer: CellBuffer } {
   const buf = new CellBuffer(totalRows, totalCols);
 
@@ -156,7 +157,7 @@ export function renderFrame(
     renderSessionPicker(buf, sessionPicker, totalRows, totalCols);
   } else if (prefixActive) {
     renderPaneBadges(buf, visible);
-    renderPrefixOverlay(buf, totalRows, totalCols, moveMode);
+    renderPrefixOverlay(buf, totalRows, totalCols, moveMode, tagMode);
   }
 
   // Diff against previous buffer
@@ -254,14 +255,21 @@ export function renderPrefixOverlay(
   totalRows: number,
   totalCols: number,
   moveMode: boolean = false,
+  tagMode: boolean = false,
 ): void {
   const lines = moveMode ? [
     ["", "Pick a position to move this pane to:", "", ""],
     ["1-9", "position  ", "a-z", "position "],
     ["Esc", "cancel    ", "", "          "],
+  ] : tagMode ? [
+    [",", "prev pane ", ".", "next pane "],
+    ["1-9", "jump to # ", "l", "layout   "],
+    ["m", "move pane ", "n", "sessions  "],
+    ["q", "quit      ", "", "          "],
+    ["Esc", "cancel    ", "", "          "],
   ] : [
     [",", "prev pane ", ".", "next pane "],
-    ["1-9,a-z", "jump to # ", "l", "layout   "],
+    ["1-9", "jump to # ", "l", "layout   "],
     ["m", "move pane ", "n", "sessions  "],
     ["w", "close pane", "q", "quit      "],
     ["Esc", "cancel    ", "", "          "],
