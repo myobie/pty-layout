@@ -83,12 +83,12 @@ describe("move command and position letters", () => {
 describe("paste with embedded control chars", () => {
   it("Ctrl+] in middle of paste triggers prefix + forwards text around it", () => {
     const write = vi.fn();
-    const actions = processInput(Buffer.from("hello\x1dlworld"), write);
-    // "hello" forwarded, Ctrl+] consumed, "l" in same buffer = cycleLayout,
-    // "world" forwarded
+    // `w` is non-sticky — after it runs as a command, remaining text
+    // forwards. "hello\x1dworld" → "hello" fwd, ^]w=closePane, "orld" fwd.
+    const actions = processInput(Buffer.from("hello\x1dworld"), write);
     expect(write).toHaveBeenCalledWith("hello");
-    expect(actions).toEqual([{ type: "cycleLayout" }]);
-    expect(write).toHaveBeenCalledWith("world");
+    expect(actions).toEqual([{ type: "closePane" }]);
+    expect(write).toHaveBeenCalledWith("orld");
   });
 
   it("Ctrl+\\ in middle of paste produces detach + forwards text around it", () => {
@@ -101,7 +101,8 @@ describe("paste with embedded control chars", () => {
 
   it("multiple control chars in a single buffer produce multiple actions", () => {
     const write = vi.fn();
-    const actions = processInput(Buffer.from("\x1dl\x1dn"), write);
+    // `l` is sticky, so we don't need a second \x1d before `n`
+    const actions = processInput(Buffer.from("\x1dln"), write);
     expect(actions).toEqual([
       { type: "cycleLayout" },
       { type: "newShell" },
@@ -172,8 +173,9 @@ describe("Ctrl+] prefix key", () => {
 
   it("executes command when key follows in same buffer", () => {
     const write = vi.fn();
-    const actions = processInput(Buffer.from("\x1dl"), write);
-    expect(actions).toEqual([{ type: "cycleLayout" }]);
+    // `w` (closePane) is non-sticky — prefix exits after command runs
+    const actions = processInput(Buffer.from("\x1dw"), write);
+    expect(actions).toEqual([{ type: "closePane" }]);
     expect(isPrefixPending()).toBe(false);
     expect(write).not.toHaveBeenCalled();
   });
@@ -197,8 +199,9 @@ describe("Ctrl+] prefix key", () => {
 
   it("forwards text after non-sticky command", () => {
     const write = vi.fn();
-    const actions = processInput(Buffer.from("\x1dlmore"), write);
-    expect(actions).toEqual([{ type: "cycleLayout" }]);
+    // `w` is non-sticky — "more" forwards after closePane runs
+    const actions = processInput(Buffer.from("\x1dwmore"), write);
+    expect(actions).toEqual([{ type: "closePane" }]);
     expect(write).toHaveBeenCalledWith("more");
   });
 });
@@ -231,13 +234,26 @@ describe("prefix sticky keys", () => {
 
   it("sticky then non-sticky exits prefix", () => {
     const write = vi.fn();
-    const actions = processInput(Buffer.from("\x1d.,l"), write);
+    // `w` (close pane) is non-sticky so it exits prefix
+    const actions = processInput(Buffer.from("\x1d.,w"), write);
     expect(actions).toEqual([
       { type: "focusNext" },
       { type: "focusPrev" },
-      { type: "cycleLayout" },
+      { type: "closePane" },
     ]);
     expect(isPrefixPending()).toBe(false);
+  });
+
+  it("l stays in prefix mode (for rapid layout cycling)", () => {
+    const write = vi.fn();
+    const actions = processInput(Buffer.from("\x1dllll"), write);
+    expect(actions).toEqual([
+      { type: "cycleLayout" },
+      { type: "cycleLayout" },
+      { type: "cycleLayout" },
+      { type: "cycleLayout" },
+    ]);
+    expect(isPrefixPending()).toBe(true);
   });
 
   it("cross-buffer sticky keys work", () => {
@@ -377,6 +393,30 @@ describe("prefix cancellation", () => {
     expect(isPrefixPending()).toBe(false);
     const forwarded = write.mock.calls.map(c => c[0]).join("");
     expect(forwarded).toBe("a");
+  });
+
+  it("kitty-encoded Esc (\\x1b[27u) cancels prefix without leaking to pane", () => {
+    // When the focused pane has kitty keyboard active, pty-layout
+    // proxies the flags to the outer terminal, which then sends Esc
+    // as \x1b[27u instead of bare \x1b. The prefix-cancel path must
+    // recognize this form — otherwise the 4-byte sequence leaks
+    // through to the focused pane (which decodes it back to Esc and
+    // e.g. cancels a claude prompt the user didn't want to cancel).
+    const write = vi.fn();
+    processInput(Buffer.from("\x1d"), write);
+    expect(isPrefixPending()).toBe(true);
+
+    processInput(Buffer.from("\x1b[27u"), write);
+    expect(isPrefixPending()).toBe(false);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("kitty-encoded Esc with modifier (\\x1b[27;5u) also cancels without leaking", () => {
+    const write = vi.fn();
+    processInput(Buffer.from("\x1d"), write);
+    processInput(Buffer.from("\x1b[27;5u"), write);
+    expect(isPrefixPending()).toBe(false);
+    expect(write).not.toHaveBeenCalled();
   });
 });
 

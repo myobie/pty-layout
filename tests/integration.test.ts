@@ -201,21 +201,97 @@ describe("pane management", () => {
 });
 
 describe("layout cycling", () => {
-  it("^]l cycles grid -> zoom -> single -> grid", async () => {
+  it("^]l cycles grid -> stacked -> single -> grid by default (zoom excluded)", async () => {
     startApp(["bash", "bash"]);
     await session.waitForText("grid", 15000);
 
+    // `l` is sticky — first press enters prefix AND cycles; subsequent
+    // bare `l` presses continue cycling while prefix stays active.
     prefixKey("l");
+    await session.waitForText("stacked", 5000);
+
+    session.sendKeys("l");
+    await session.waitForText("single", 5000);
+
+    session.sendKeys("l");
+    await session.waitForText("grid", 5000);
+
+    // Cancel prefix when done
+    session.sendKeys("\x1b");
+  }, 20000);
+
+  it("--layouts=+zoom adds zoom to the cycle", async () => {
+    startApp(["--layouts=+zoom", "bash", "bash"]);
+    await session.waitForText("grid", 15000);
+
+    prefixKey("l");
+    await session.waitForText("stacked", 5000);
+
+    session.sendKeys("l");
+    await session.waitForText("single", 5000);
+
+    session.sendKeys("l");
     await session.waitForText("zoom", 5000);
 
+    session.sendKeys("l");
+    await session.waitForText("grid", 5000);
+
+    session.sendKeys("\x1b");
+  }, 20000);
+});
+
+describe("stacked layout", () => {
+  it("shows all pane titles and expands the focused pane", async () => {
+    startApp(["bash", "bash", "bash"]);
+    await session.waitForText("1/3", 15000);
+    await new Promise(r => setTimeout(r, 500));
+
+    // Switch to stacked: grid -> stacked (default cycle, zoom excluded)
     prefixKey("l");
-    await session.waitForText("single", 5000);
+    await session.waitForText("stacked", 5000);
+
+    // All three pane titles should be visible as collapsed strips or
+    // the focused box title. Position keys 1, 2, 3 should all appear.
+    await new Promise(r => setTimeout(r, 300));
     const ss = session.screenshot();
     expect(ss.text).toContain("1:");
+    expect(ss.text).toContain("2:");
+    expect(ss.text).toContain("3:");
+  }, 25000);
 
+  it("switching focus changes which pane is expanded", async () => {
+    startApp(["bash", "bash"]);
+    await session.waitForText("1/2", 15000);
+    await new Promise(r => setTimeout(r, 500));
+
+    // Type identifiable text into pane 1 so we can confirm it's expanded
+    session.type("echo PANE1-CONTENT\r");
+    await session.waitForText("PANE1-CONTENT", 5000);
+
+    // Focus pane 2, type there
+    prefixKey("2");
+    await session.waitForText("2/2", 5000);
+    session.type("echo PANE2-CONTENT\r");
+    await session.waitForText("PANE2-CONTENT", 5000);
+
+    // Switch to stacked mode (default cycle: grid -> stacked). `l` is
+    // sticky so we cancel prefix with Esc afterwards.
     prefixKey("l");
-    await session.waitForText("grid", 5000);
-  }, 20000);
+    await session.waitForText("stacked", 5000);
+    session.sendKeys("\x1b");
+    await new Promise(r => setTimeout(r, 300));
+
+    // Pane 2 is focused: its content must be visible
+    let ss = session.screenshot();
+    expect(ss.text).toContain("PANE2-CONTENT");
+
+    // Focus pane 1: its content becomes visible
+    prefixKey("1");
+    await session.waitForText("1/2", 5000);
+    await new Promise(r => setTimeout(r, 300));
+    ss = session.screenshot();
+    expect(ss.text).toContain("PANE1-CONTENT");
+  }, 30000);
 });
 
 describe("focus navigation", () => {
@@ -257,11 +333,13 @@ describe("single mode", () => {
     session.type("echo beta-content\r");
     await session.waitForText("beta-content", 5000);
 
-    // Cycle to single: grid -> zoom -> single
+    // Cycle to single: grid -> stacked -> single (default cycle).
+    // `l` is sticky — second press is bare `l` (prefix still active).
     prefixKey("l");
-    await session.waitForText("zoom", 5000);
-    prefixKey("l");
+    await session.waitForText("stacked", 5000);
+    session.sendKeys("l");
     await session.waitForText("single", 5000);
+    session.sendKeys("\x1b"); // cancel prefix
 
     // Should show pane 2 (still focused)
     let ss = session.screenshot();

@@ -1,6 +1,13 @@
 #!/usr/bin/env node --experimental-strip-types --no-warnings
 import { hideCursor, showCursor, reset } from "@myobie/pty/tui";
-import { calculateLayout, nextLayoutMode, type LayoutMode, type PaneRect } from "./layout.ts";
+import {
+  calculateLayout,
+  nextLayoutMode,
+  parseLayoutsFlag,
+  DEFAULT_LAYOUT_MODES,
+  type LayoutMode,
+  type PaneRect,
+} from "./layout.ts";
 import { createSessionPane, createAttachPane, createLocalPane, closePane, defaultShell, type Pane } from "./pane.ts";
 import { renderFrame, clearCellCache, renderSessionPicker, renderPrefixOverlay } from "./render.ts";
 import { processInput, isPrefixPending } from "./keys.ts";
@@ -59,6 +66,7 @@ const STATUS_BAR_HEIGHT = 1;
 let panes: Pane[] = [];
 let focusedIndex = 0;
 let layoutMode: LayoutMode = "grid";
+let enabledLayouts: LayoutMode[] = [...DEFAULT_LAYOUT_MODES];
 let prevBuffer: CellBuffer | null = null;
 let renderTimer: ReturnType<typeof setTimeout> | null = null;
 let renderTimerDelay = 16;
@@ -580,7 +588,7 @@ function handleStdin(data: Buffer) {
   for (const action of actions) {
     switch (action.type) {
       case "cycleLayout":
-        layoutMode = nextLayoutMode(layoutMode);
+        layoutMode = nextLayoutMode(layoutMode, enabledLayouts);
         prevBuffer = null;
         scheduleRender();
         break;
@@ -852,12 +860,14 @@ interface ParsedArgs {
   specs: PaneSpec[];
   tagFilters: TagFilter[];
   tmux: boolean;
+  layouts: LayoutMode[];
 }
 
 export function parseArgs(argv: string[]): ParsedArgs {
   const specs: PaneSpec[] = [];
   const filters: TagFilter[] = [];
   let tmux = false;
+  let layouts: LayoutMode[] = [...DEFAULT_LAYOUT_MODES];
 
   let i = 0;
   while (i < argv.length) {
@@ -867,6 +877,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
     } else if (argv[i] === "--tmux") {
       tmux = true;
       i++;
+    } else if (argv[i]!.startsWith("--layouts=")) {
+      layouts = parseLayoutsFlag(argv[i]!.slice("--layouts=".length));
+      i++;
+    } else if (argv[i] === "--layouts" && i + 1 < argv.length) {
+      layouts = parseLayoutsFlag(argv[i + 1]!);
+      i += 2;
     } else {
       const arg = argv[i]!;
       if (arg.startsWith("@")) {
@@ -879,7 +895,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     }
   }
 
-  return { specs, tagFilters: filters, tmux };
+  return { specs, tagFilters: filters, tmux, layouts };
 }
 
 // --- Empty tag state ---
@@ -928,6 +944,7 @@ async function main() {
   const parsed = parseArgs(process.argv.slice(2));
   tagFilters = parsed.tagFilters;
   tmuxMode = parsed.tmux;
+  enabledLayouts = parsed.layouts;
   // --tmux without --tag: auto-generate a unique tag so the shim's
   // spawn-path (split-window, list-panes, etc.) has something to scope
   // sessions to. Without this, the shim would error on every spawn.

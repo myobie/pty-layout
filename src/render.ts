@@ -33,10 +33,26 @@ const GREY: [number, number, number] = [100, 100, 100];
 const STATUS_BG: [number, number, number] = [40, 40, 40];
 const STATUS_FG: [number, number, number] = [180, 180, 180];
 
+/** Build the content of a 1-row collapsed pane title strip (no color
+ *  escapes, no cursor positioning — the caller wraps with those).
+ *  Uses 2 horizontal rule chars before the padded title so the title
+ *  column lines up with the focused box's `╭─ title` (corner + rule +
+ *  space = 3 cols before title start). The collapsed strip is
+ *  `── title ───────────` — same 3-col prefix before the title text.
+ *  Exported for unit testing. */
+export function buildCollapsedTitleStrip(title: string, width: number): string {
+  const leftLead = 2;
+  const titleText = ` ${title} `;
+  const titleLen = visibleLength(titleText);
+  const rightFill = Math.max(0, width - leftLead - titleLen);
+  return "─".repeat(leftLead) + titleText + "─".repeat(rightFill);
+}
+
 const MODE_LABELS: Record<LayoutMode, string> = {
   grid: "grid",
   zoom: "zoom",
   single: "single",
+  stacked: "stacked",
 };
 
 export function renderFrame(
@@ -81,6 +97,19 @@ export function renderFrame(
     const borderColor = isFocused ? GREEN : GREY;
     const titleKey = indexToPositionKey(paneIndex) ?? String(paneIndex + 1);
     const title = `${titleKey}: ${pane.title}`;
+
+    // Collapsed pane (stacked layout unfocused slot): render a 1-row
+    // horizontal-rule strip with the title embedded.
+    if (rect.outerHeight === 1) {
+      buf.writeAnsi(
+        moveTo(rect.outerRow, rect.outerCol) +
+        fg(borderColor[0], borderColor[1], borderColor[2]) +
+        buildCollapsedTitleStrip(title, rect.outerWidth) +
+        reset()
+      );
+      pane.handle.dirty = false;
+      continue;
+    }
 
     // Draw border with title and fill
     const boxAnsi =
@@ -267,8 +296,8 @@ export function renderPrefixOverlay(
   tagMode: boolean = false,
 ): void {
   const lines = moveMode ? [
-    ["", "Pick a position to move this pane to:", "", ""],
-    ["1-9", "position  ", "a-z", "position "],
+    ["", "Move this pane to:", "", ""],
+    ["1-9", "position  ", "", "          "],
     ["Esc", "cancel    ", "", "          "],
   ] : tagMode ? [
     [",", "prev pane ", ".", "next pane "],
@@ -285,7 +314,15 @@ export function renderPrefixOverlay(
   ];
 
   const colWidth = 17;
-  const contentWidth = colWidth * 2;
+  // A "title row" has both key columns empty — it's a full-width
+  // description (e.g. "Pick a position to move this pane to:"). Widen
+  // the box so long titles fit without overflowing the border.
+  const isTitleRow = (row: readonly string[]) =>
+    row[0] === "" && row[2] === "" && row[1] !== "";
+  const titleWidths = lines
+    .filter(isTitleRow)
+    .map(r => visibleLength(r[1]!) + 2); // 2-char left margin
+  const contentWidth = Math.max(colWidth * 2, ...titleWidths);
   const boxWidth = contentWidth + 2;
   const boxHeight = lines.length + 2;
 
@@ -307,14 +344,26 @@ export function renderPrefixOverlay(
     const row = lines[r]!;
     ansi += moveTo(startRow + 1 + r, startCol + 1);
     ansi += bg(OVERLAY_BG[0], OVERLAY_BG[1], OVERLAY_BG[2]);
+
+    if (isTitleRow(row)) {
+      // Full-width description row. 2-char indent + padded text.
+      const text = row[1]!;
+      ansi +=
+        fg(OVERLAY_FG[0], OVERLAY_FG[1], OVERLAY_FG[2]) +
+        "  " + text.padEnd(contentWidth - 2);
+      continue;
+    }
+
     for (let c = 0; c < row.length; c += 2) {
       const key = row[c]!;
       const desc = row[c + 1]!;
+      // Columns center in the wider box if title-driven width kicked in
+      const cellWidth = Math.max(colWidth, Math.floor(contentWidth / 2));
       ansi +=
         fg(OVERLAY_KEY[0], OVERLAY_KEY[1], OVERLAY_KEY[2]) +
         (" " + key).padEnd(5) +
         fg(OVERLAY_FG[0], OVERLAY_FG[1], OVERLAY_FG[2]) +
-        desc.padEnd(colWidth - 5);
+        desc.padEnd(cellWidth - 5);
     }
   }
 

@@ -9,13 +9,57 @@ export interface PaneRect {
   innerHeight: number;
 }
 
-export type LayoutMode = "grid" | "zoom" | "single";
+export type LayoutMode = "grid" | "zoom" | "single" | "stacked";
 
-export const LAYOUT_MODES: LayoutMode[] = ["grid", "zoom", "single"];
+/** Layouts cycled through by default (when --layouts is unset).
+ *  Order: grid → stacked → single → grid. Zoom is opt-in because
+ *  most users don't want it in their rotation; pass `--layouts=+zoom`
+ *  to add it. */
+export const DEFAULT_LAYOUT_MODES: LayoutMode[] = ["grid", "stacked", "single"];
 
-export function nextLayoutMode(current: LayoutMode): LayoutMode {
-  const idx = LAYOUT_MODES.indexOf(current);
-  return LAYOUT_MODES[(idx + 1) % LAYOUT_MODES.length]!;
+/** All known layout names, including opt-in ones. Used for validation. */
+export const ALL_LAYOUT_MODES: LayoutMode[] = ["grid", "zoom", "single", "stacked"];
+
+export function isLayoutMode(value: string): value is LayoutMode {
+  return (ALL_LAYOUT_MODES as string[]).includes(value);
+}
+
+/** Cycle through the provided layout list. Falls back to the first
+ *  entry if `current` isn't in the list (shouldn't happen in normal
+ *  use). */
+export function nextLayoutMode(
+  current: LayoutMode,
+  enabled: LayoutMode[] = DEFAULT_LAYOUT_MODES,
+): LayoutMode {
+  if (enabled.length === 0) return current;
+  const idx = enabled.indexOf(current);
+  if (idx === -1) return enabled[0]!;
+  return enabled[(idx + 1) % enabled.length]!;
+}
+
+/** Parse a `--layouts=<value>` CLI argument. Each comma-separated token
+ *  starting with `+` adds that layout to the default list (if not
+ *  already present). Unknown names throw. Example: `+zoom` →
+ *  `[grid, stacked, single, zoom]`. */
+export function parseLayoutsFlag(value: string): LayoutMode[] {
+  const out: LayoutMode[] = [...DEFAULT_LAYOUT_MODES];
+  const tokens = value.split(",").map(s => s.trim()).filter(Boolean);
+  for (const tok of tokens) {
+    if (!tok.startsWith("+")) {
+      throw new Error(
+        `--layouts: unsupported token "${tok}". Only "+<name>" is supported ` +
+        `(e.g. --layouts=+zoom). The default set is always included.`,
+      );
+    }
+    const name = tok.slice(1);
+    if (!isLayoutMode(name)) {
+      throw new Error(
+        `--layouts: unknown layout "${name}". Valid names: ${ALL_LAYOUT_MODES.join(", ")}.`,
+      );
+    }
+    if (!out.includes(name)) out.push(name);
+  }
+  return out;
 }
 
 function makeRect(
@@ -56,6 +100,8 @@ export function calculateLayout(
       return zoomLayout(paneCount, availRows, totalCols);
     case "single":
       return [makeRect(1, 1, totalCols, availRows)];
+    case "stacked":
+      return stackedLayout(paneCount, availRows, totalCols, focusedIndex);
   }
 }
 
@@ -97,6 +143,44 @@ function gridLayout(
       : cellHeight;
 
     rects.push(makeRect(outerRow, outerCol, outerWidth, outerHeight));
+  }
+
+  return rects;
+}
+
+/**
+ * Stacked layout: panes arranged top-to-bottom in index order. Only the
+ * focused pane is "open" and gets a full bordered box with content; all
+ * others are collapsed to a 1-row title strip. Unfocused panes keep
+ * whatever PTY size they had when last focused — we don't resize their
+ * handles (same policy as single mode).
+ */
+function stackedLayout(
+  count: number,
+  availRows: number,
+  totalCols: number,
+  focusedIndex: number,
+): PaneRect[] {
+  if (count === 1) {
+    return [makeRect(1, 1, totalCols, availRows)];
+  }
+
+  const collapsedHeight = 1;
+  const collapsedTotal = (count - 1) * collapsedHeight;
+  // If there are so many panes that the focused one would be < 0 rows,
+  // clamp to 0. The render layer will skip content drawing in that case.
+  const focusedOuterHeight = Math.max(availRows - collapsedTotal, 0);
+
+  const rects: PaneRect[] = [];
+  let cursor = 1;
+  for (let i = 0; i < count; i++) {
+    if (i === focusedIndex) {
+      rects.push(makeRect(cursor, 1, totalCols, focusedOuterHeight));
+      cursor += focusedOuterHeight;
+    } else {
+      rects.push(makeRect(cursor, 1, totalCols, collapsedHeight));
+      cursor += collapsedHeight;
+    }
   }
 
   return rects;

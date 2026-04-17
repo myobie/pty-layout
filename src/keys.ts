@@ -23,7 +23,7 @@ export interface Action {
 
 // Keys that stay in prefix mode after executing (for repeated navigation).
 // `m` stays active so the next keypress is interpreted as a move target.
-const STICKY_KEYS = new Set([",", ".", "m"]);
+const STICKY_KEYS = new Set([",", ".", "m", "l"]);
 
 const COMMAND_MAP: Record<string, Action> = {
   l: { type: "cycleLayout" },
@@ -227,6 +227,22 @@ export function processInput(
 
     // --- Prefix mode: consume keys as commands ---
     if (prefixPending) {
+      // Kitty-encoded Esc (`\x1b[27u` or `\x1b[27;<mod>u`): treat like a
+      // bare Esc — cancel prefix and consume the whole sequence. Without
+      // this, the Esc sequence leaks through to the focused pane when
+      // the pane has kitty keyboard protocol active and pty-layout is
+      // proxying the flags to the outer terminal.
+      if (str[i] === "\x1b" && i + 1 < str.length && str[i + 1] === "[") {
+        const csiU = parseCsiU(str, i);
+        if (csiU && csiU.codepoint === 27) {
+          prefixPending = false;
+          flush(i);
+          i += csiU.length;
+          forwardStart = i;
+          continue;
+        }
+      }
+
       const code = str.charCodeAt(i);
 
       // Ctrl+] again: cancel prefix
