@@ -238,15 +238,19 @@ export function processInput(
         continue;
       }
 
-      // Escape: cancel prefix. Always consume the ESC byte — never let
-      // it fall through to the focused pane, even when more bytes follow
-      // in the same read. The user's intent when hitting Esc in prefix
-      // mode is "dismiss the modal", not "send an escape sequence".
+      // Escape: cancel prefix. Consume a BARE ESC so it never leaks to
+      // the pane when the user hits Esc to dismiss the modal. BUT if
+      // the ESC is the start of a CSI sequence (ESC[...), leave it
+      // intact — those are arrow keys, function keys, or bracketed
+      // paste markers that we need to forward unchanged.
       if (code === 0x1b) {
         prefixPending = false;
-        flush(i);
-        i++;
-        forwardStart = i;
+        const isCsiStart = i + 1 < str.length && str[i + 1] === "[";
+        if (!isCsiStart) {
+          flush(i);
+          i++;
+          forwardStart = i;
+        }
         continue;
       }
 

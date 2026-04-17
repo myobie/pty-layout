@@ -292,19 +292,91 @@ describe("prefix cancellation", () => {
     expect(write).not.toHaveBeenCalled();
   });
 
-  it("Escape never falls through to the pane, even with trailing bytes", () => {
+  it("bracketed paste markers pass through unparsed (end in `~`, not u/M/m)", () => {
+    const write = vi.fn();
+    const paste = "\x1b[200~line1\nline2\nline3\x1b[201~";
+    const actions = processInput(Buffer.from(paste), write);
+    expect(actions).toEqual([]);
+    const forwarded = write.mock.calls.map(c => c[0]).join("");
+    expect(forwarded).toBe(paste);
+  });
+
+  it("empty bracketed paste passes through intact", () => {
+    const write = vi.fn();
+    const paste = "\x1b[200~\x1b[201~";
+    processInput(Buffer.from(paste), write);
+    const forwarded = write.mock.calls.map(c => c[0]).join("");
+    expect(forwarded).toBe(paste);
+  });
+
+  it("large multi-line paste passes through with newlines intact", () => {
+    const write = vi.fn();
+    const content = Array.from({ length: 50 }, (_, i) => `line ${i}`).join("\n");
+    const paste = `\x1b[200~${content}\x1b[201~`;
+    processInput(Buffer.from(paste), write);
+    const forwarded = write.mock.calls.map(c => c[0]).join("");
+    expect(forwarded).toBe(paste);
+    expect(forwarded).toContain("\n");
+    expect(forwarded.split("\n").length).toBe(50);
+  });
+
+  it("paste with content containing tabs and special chars passes through", () => {
+    const write = vi.fn();
+    const paste = "\x1b[200~\tfn foo() {\n\treturn \"hi\";\n}\x1b[201~";
+    processInput(Buffer.from(paste), write);
+    expect(write.mock.calls.map(c => c[0]).join("")).toBe(paste);
+  });
+
+  it("paste arriving while prefix pending: dismisses modal AND forwards paste intact", () => {
     const write = vi.fn();
     processInput(Buffer.from("\x1d"), write);
     expect(isPrefixPending()).toBe(true);
 
-    // ESC arriving with more bytes in the same read must NOT leak the ESC
-    // (or the whole sequence) to the focused pane.
-    const actions = processInput(Buffer.from("\x1b[A"), write);
-    expect(actions).toEqual([]);
+    // Paste arrives while the overlay is showing. Prefix should cancel
+    // (overlay dismisses) but the paste markers + content must reach
+    // the pane so the editor's bracketed-paste handler kicks in.
+    const paste = "\x1b[200~pasted\x1b[201~";
+    processInput(Buffer.from(paste), write);
     expect(isPrefixPending()).toBe(false);
-    // Whatever gets forwarded, it must not include the ESC byte
     const forwarded = write.mock.calls.map(c => c[0]).join("");
-    expect(forwarded).not.toContain("\x1b");
+    expect(forwarded).toBe(paste);
+  });
+
+  it("arrow keys arriving while prefix pending: cancel prefix AND forward intact", () => {
+    const write = vi.fn();
+    processInput(Buffer.from("\x1d"), write);
+    expect(isPrefixPending()).toBe(true);
+
+    // Up arrow is ESC[A — same shape as paste markers (CSI sequence).
+    // Must flow through to the focused pane, not get beheaded.
+    processInput(Buffer.from("\x1b[A"), write);
+    expect(isPrefixPending()).toBe(false);
+    const forwarded = write.mock.calls.map(c => c[0]).join("");
+    expect(forwarded).toBe("\x1b[A");
+  });
+
+  it("bare Esc cancels prefix without leaking to the pane", () => {
+    // Regression: the original bug. User hits ^] to open the modal,
+    // then hits Esc to dismiss — ESC must not leak as a keystroke to
+    // the focused pane (which would cause e.g. vim to enter normal mode).
+    const write = vi.fn();
+    processInput(Buffer.from("\x1d"), write);
+    expect(isPrefixPending()).toBe(true);
+    processInput(Buffer.from("\x1b"), write);
+    expect(isPrefixPending()).toBe(false);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("Esc followed by non-CSI byte: consumes Esc, forwards rest", () => {
+    // Unusual but possible: user hits Esc then another key in quick
+    // succession. The Esc cancels prefix; the trailing byte goes to
+    // the pane as a normal character.
+    const write = vi.fn();
+    processInput(Buffer.from("\x1d"), write);
+    processInput(Buffer.from("\x1ba"), write);
+    expect(isPrefixPending()).toBe(false);
+    const forwarded = write.mock.calls.map(c => c[0]).join("");
+    expect(forwarded).toBe("a");
   });
 });
 

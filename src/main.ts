@@ -44,6 +44,14 @@ const enterAltScreen = "\x1b[?1049h";
 const leaveAltScreen = "\x1b[?1049l";
 const enableMouse = "\x1b[?1002h\x1b[?1006h"; // button-motion tracking + SGR encoding
 const disableMouse = "\x1b[?1006l\x1b[?1002l";
+// Bracketed paste: tells the outer terminal "wrap user pastes in
+// \x1b[200~...\x1b[201~". Those markers pass through our input handler
+// untouched (end in `~`, not a key we parse) and reach the focused
+// pane's app. Editors like helix/vim see the markers and skip
+// auto-indent for the pasted content — fixes the "each pasted line
+// gets more indented" bug.
+const enableBracketedPaste = "\x1b[?2004h";
+const disableBracketedPaste = "\x1b[?2004l";
 const STATUS_BAR_HEIGHT = 1;
 
 // --- State ---
@@ -309,7 +317,7 @@ function detach() {
   for (const pane of panes) {
     pane.handle.kill();
   }
-  process.stdout.write(disableMouse + showCursor() + reset() + leaveAltScreen);
+  process.stdout.write(disableMouse + disableBracketedPaste + showCursor() + reset() + leaveAltScreen);
   if (process.stdin.isTTY) {
     process.stdin.setRawMode(false);
   }
@@ -947,7 +955,7 @@ async function main() {
 
   // Set up terminal
   running = true;
-  process.stdout.write(enterAltScreen + enableMouse + hideCursor());
+  process.stdout.write(enterAltScreen + enableMouse + enableBracketedPaste + hideCursor());
   if (process.stdin.isTTY) {
     process.stdin.setRawMode(true);
   }
