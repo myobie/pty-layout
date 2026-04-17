@@ -51,9 +51,20 @@ export function hasDragDistance(sel: SelectionState): boolean {
   return sel.startRow !== sel.endRow || sel.startCol !== sel.endCol;
 }
 
+/** Extract selected text, joining logical lines correctly.
+ *
+ *  `wrapped` (optional) is a parallel array of row-level flags from
+ *  `PtyHandle.readWrappedFlags(scrollOffset)`: `wrapped[r] === true`
+ *  means row `r` is a wrap-continuation of row `r-1` (no real newline).
+ *  When provided, we join wrapped rows with no separator so long
+ *  single-line content (URLs, command lines, JSON) round-trips
+ *  intact. When omitted, falls back to always-newline (legacy
+ *  behavior).
+ */
 export function extractSelectedText(
   cells: { char: string }[][],
   sel: SelectionState,
+  wrapped?: boolean[],
 ): string {
   let r1 = sel.startRow, c1 = sel.startCol;
   let r2 = sel.endRow, c2 = sel.endCol;
@@ -61,10 +72,13 @@ export function extractSelectedText(
     [r1, c1, r2, c2] = [r2, c2, r1, c1];
   }
 
-  const lines: string[] = [];
+  let out = "";
   for (let r = r1; r <= r2; r++) {
     const row = cells[r];
-    if (!row) { lines.push(""); continue; }
+    if (!row) {
+      if (r < r2) out += "\n";
+      continue;
+    }
     const colStart = r === r1 ? c1 : 0;
     const colEnd = r === r2 ? c2 : row.length - 1;
     let line = "";
@@ -72,9 +86,16 @@ export function extractSelectedText(
       const ch = row[c]?.char ?? " ";
       if (ch !== "") line += ch; // skip wide-char placeholders
     }
-    lines.push(line.trimEnd());
+    // Only trim trailing spaces for rows that end at a real line break.
+    // For wrapped rows, the content continues on the next row — trimming
+    // would drop significant padding/spaces that are part of the line.
+    const nextIsWrap = wrapped && r + 1 <= r2 && wrapped[r + 1] === true;
+    out += nextIsWrap ? line : line.trimEnd();
+    if (r < r2) {
+      out += nextIsWrap ? "" : "\n";
+    }
   }
-  return lines.join("\n");
+  return out;
 }
 
 export function copyToClipboard(text: string): string {

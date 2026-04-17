@@ -154,6 +154,77 @@ describe("extractSelectedText", () => {
     const text = extractSelectedText(wideGrid, sel(0, 0, 0, 3));
     expect(text).toBe("A漢B");
   });
+
+  describe("with wrapped flags", () => {
+    // A URL that wraps across 3 screen rows (cols=10). The content is:
+    //   "https://ex"  "ample.com/"  "long/path "
+    // Rows 1 and 2 are continuations — wrapped[1]=true, wrapped[2]=true.
+    const urlGrid = [
+      [{ char: "h" }, { char: "t" }, { char: "t" }, { char: "p" }, { char: "s" }, { char: ":" }, { char: "/" }, { char: "/" }, { char: "e" }, { char: "x" }],
+      [{ char: "a" }, { char: "m" }, { char: "p" }, { char: "l" }, { char: "e" }, { char: "." }, { char: "c" }, { char: "o" }, { char: "m" }, { char: "/" }],
+      [{ char: "l" }, { char: "o" }, { char: "n" }, { char: "g" }, { char: "/" }, { char: "p" }, { char: "a" }, { char: "t" }, { char: "h" }, { char: " " }],
+    ];
+
+    it("joins wrapped rows without a newline (reconstructs a URL)", () => {
+      const text = extractSelectedText(urlGrid, sel(0, 0, 2, 8), [false, true, true]);
+      expect(text).toBe("https://example.com/long/path");
+    });
+
+    it("emits a newline at the last row of a wrap group (real line break after)", () => {
+      // Two lines, each wrap-broken into 2 rows.
+      // Line A (rows 0-1, wrapped[1]=true), Line B (rows 2-3, wrapped[3]=true).
+      // Between: wrapped[2] = false (real newline).
+      const grid = [
+        [{ char: "a" }, { char: "a" }, { char: "a" }],
+        [{ char: "b" }, { char: "b" }, { char: "b" }],
+        [{ char: "c" }, { char: "c" }, { char: "c" }],
+        [{ char: "d" }, { char: "d" }, { char: "d" }],
+      ];
+      const text = extractSelectedText(grid, sel(0, 0, 3, 2), [false, true, false, true]);
+      expect(text).toBe("aaabbb\ncccddd");
+    });
+
+    it("preserves trailing spaces on wrapped rows (don't trim mid-line)", () => {
+      // A command like:  echo hello   world
+      // Wrapping mid-spaces — trimming would lose them.
+      const grid = [
+        [{ char: "e" }, { char: "c" }, { char: "h" }, { char: "o" }, { char: " " }, { char: "h" }, { char: "i" }, { char: " " }, { char: " " }, { char: " " }],
+        [{ char: " " }, { char: "w" }, { char: "o" }, { char: "r" }, { char: "l" }, { char: "d" }, { char: " " }, { char: " " }, { char: " " }, { char: " " }],
+      ];
+      const text = extractSelectedText(grid, sel(0, 0, 1, 9), [false, true]);
+      // 3 trailing spaces on row 0 + 1 leading space on row 1 = 4 spaces
+      // between "hi" and "world". All preserved because row 1 is a wrap
+      // continuation.
+      expect(text).toBe("echo hi    world");
+    });
+
+    it("still trims trailing spaces on real-newline rows", () => {
+      // Row 0 is NOT wrapped (real line end), so trailing spaces go away.
+      const grid = [
+        [{ char: "f" }, { char: "o" }, { char: "o" }, { char: " " }, { char: " " }],
+        [{ char: "b" }, { char: "a" }, { char: "r" }, { char: " " }, { char: " " }],
+      ];
+      const text = extractSelectedText(grid, sel(0, 0, 1, 4), [false, false]);
+      expect(text).toBe("foo\nbar");
+    });
+
+    it("falls back to always-newline when wrapped is omitted (legacy)", () => {
+      const text = extractSelectedText(urlGrid, sel(0, 0, 2, 8));
+      // No wrap info → every row boundary gets \n, preserving old behavior
+      expect(text).toBe("https://ex\nample.com/\nlong/path");
+    });
+
+    it("single-row selection ignores wrapped flags (no boundary to cross)", () => {
+      const text = extractSelectedText(urlGrid, sel(0, 0, 0, 4), [false, true, true]);
+      expect(text).toBe("https");
+    });
+
+    it("selection starting mid-wrap correctly joins to end", () => {
+      // Select from row 1 col 0 to row 2 col 8: "ample.com/long/path"
+      const text = extractSelectedText(urlGrid, sel(1, 0, 2, 8), [false, true, true]);
+      expect(text).toBe("ample.com/long/path");
+    });
+  });
 });
 
 describe("copyToClipboard", () => {

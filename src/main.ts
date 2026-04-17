@@ -756,9 +756,13 @@ function handleStdin(data: Buffer) {
         selection.active = false;
 
         if (hasDragDistance(selection) && upPane) {
-          // Copy selected text to clipboard via OSC 52
+          // Copy selected text to clipboard via OSC 52. Use the wrapped
+          // flags so long lines that were visually wrapped by xterm
+          // round-trip as single logical lines (URLs, JSON, commands)
+          // instead of getting spurious \n at each row boundary.
           const cells = upPane.handle.readCells(selection.scrollOffset);
-          const text = extractSelectedText(cells, selection);
+          const wrapped = upPane.handle.readWrappedFlags(selection.scrollOffset);
+          const text = extractSelectedText(cells, selection, wrapped);
           if (text.length > 0) {
             process.stdout.write(copyToClipboard(text));
           }
