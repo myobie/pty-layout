@@ -8,7 +8,7 @@ import {
   type LayoutMode,
   type PaneRect,
 } from "./layout.ts";
-import { createSessionPane, createAttachPane, createLocalPane, closePane, defaultShell, type Pane } from "./pane.ts";
+import { createAttachPane, createLocalPane, closePane, type Pane } from "./pane.ts";
 import { renderFrame, clearCellCache, renderSessionPicker, renderPrefixOverlay } from "./render.ts";
 import { processInput, isPrefixPending } from "./keys.ts";
 import {
@@ -20,6 +20,7 @@ import {
   clampToInner,
 } from "./selection.ts";
 import { CellBuffer, fullRender, moveTo, fg, bg, visibleLength, RESET, spawnDaemon } from "@myobie/pty/tui";
+import { updateTags } from "@myobie/pty/client";
 import {
   type PickerState,
   createPickerState,
@@ -39,6 +40,8 @@ import {
 import { startStats, newLaunchId } from "./stats.ts";
 import { adjustScrollOffset } from "./scroll.ts";
 import { buildShimEnv } from "./shim-env.ts";
+import { newLayoutTagKey, formatLayoutBadge } from "./layout-tag.ts";
+import { parseNewSubcommand, parseFilterTagEnv } from "./new-subcommand.ts";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -46,6 +49,7 @@ const __dirname_main = path.dirname(fileURLToPath(import.meta.url));
 function shimDir(): string {
   return path.resolve(__dirname_main, "../shim");
 }
+
 
 const enterAltScreen = "\x1b[?1049h";
 const leaveAltScreen = "\x1b[?1049l";
@@ -76,8 +80,28 @@ let scrollOffsets: number[] = []; // per-pane scroll offset (0 = live viewport)
 let scrollLastBaseY: number[] = []; // per-pane snapshot of baseY for anchor math
 let selection: SelectionState | null = null;
 let tagSubscription: TagSubscription | null = null;
+// Filters driving the subscription. In auto-tag mode, this is
+// [{ key: layoutTagKey, value: "1" }]. In explicit --tag mode, it's the
+// user's tags.
 let tagFilters: TagFilter[] = [];
-let tagMode = false;
+// The per-layout-instance tag key (`:l<pid>-<rand>`). Always set when
+// auto-tag mode is active. `null` in explicit --tag mode — we don't
+// write tags there, we only read.
+let layoutTagKey: string | null = null;
+// Session names for CLI-spec spawns that haven't arrived through the
+// subscription yet. When they finally fire onAdd, we skip the auto-focus
+// so initial panes don't fight for focus. Entries are removed when the
+// matching onAdd fires.
+const startupPendingNames = new Set<string>();
+// Session names the user explicitly initiated (picker "+ New session").
+// When their session_start event arrives, focus the new pane so the
+// user sees their creation. Non-user-initiated adds (tmux shim teammates,
+// sessions appearing via explicit --tag shared workspace) skip focus
+// so they don't yank the user out of their current pane.
+const focusOnAddNames = new Set<string>();
+// Auto-tag mode: we own the tag, so picker applies it, close removes it,
+// quit cleans up. Explicit-tag mode: user owns the tag, we only subscribe.
+let autoTagMode = false;
 let tmuxMode = false;
 let showingSessionPicker = false;
 let pickerState: PickerState | null = null;
@@ -209,7 +233,8 @@ function doRender() {
     selection,
     showingSessionPicker ? pickerState : null,
     moveMode,
-    tagMode,
+    /*readOnlyTagMode=*/!autoTagMode,
+    formatLayoutBadge(tagFilters, layoutTagKey),
   );
 
   process.stdout.write(output);
@@ -218,7 +243,7 @@ function doRender() {
 
 // --- Pane management ---
 
-function addPane(pane: Pane) {
+function addPane(pane: Pane, opts: { focus?: boolean } = {}) {
   pane.handle.onActivity = () => {
     const urgent = panes[focusedIndex] === pane && expectingFocusedEcho;
     if (urgent) expectingFocusedEcho = false;
@@ -227,10 +252,18 @@ function addPane(pane: Pane) {
       setTimeout(() => removePane(pane), 50);
     }
   };
+  const wasEmpty = panes.length === 0;
   panes.push(pane);
   scrollOffsets.push(0);
   scrollLastBaseY.push(pane.handle.baseY);
-  focusedIndex = panes.length - 1;
+  // Default: focus the new pane (runtime adds — user just picked it, or
+  // the shim spawned a teammate they want to see). Startup hydration
+  // passes focus=false so the initial panes don't fight each other for
+  // focus as the subscription's initialSessions all add in sequence.
+  const shouldFocus = opts.focus ?? true;
+  if (wasEmpty || shouldFocus) {
+    focusedIndex = panes.length - 1;
+  }
   prevBuffer = null;
   scheduleRender();
 }
@@ -245,8 +278,10 @@ function removePane(pane: Pane) {
   scrollLastBaseY.splice(idx, 1);
 
   if (panes.length === 0) {
-    if (!tagMode && !showingSessionPicker) {
+    if (autoTagMode && !showingSessionPicker) {
       // Reopen the picker instead of exiting. Explicit quit is ^] q.
+      // In explicit --tag mode we don't reopen — the user set up a
+      // passive-watch view and an empty-state is valid.
       openSessionPicker();
       return;
     }
@@ -264,9 +299,32 @@ function removePane(pane: Pane) {
   scheduleRender();
 }
 
+/** Best-effort remove the layout's tag from a session. Called when the
+ *  user closes a pane in auto-tag mode — the session keeps running, it
+ *  just drops out of this layout's view. No-op (and silent) if the
+ *  session or metadata is already gone. */
+async function untagSession(sessionName: string): Promise<void> {
+  if (!autoTagMode || !layoutTagKey) return;
+  try {
+    await updateTags(sessionName, {}, [layoutTagKey]);
+  } catch {
+    // Session exited, metadata gone, or permissions issue. Harmless;
+    // pty gc will clean up the orphan if any, or the session is already
+    // gone so the tag is too.
+  }
+  tagSubscription?.untrack(sessionName);
+}
+
 function removeFocusedPane() {
   if (panes.length === 0) return;
   const pane = panes[focusedIndex];
+
+  // Fire-and-forget untag. In auto-tag mode the session keeps running
+  // but drops out of the subscription so the event follower's
+  // session_exit handler won't double-remove.
+  if (pane.source.type === "session") {
+    void untagSession(pane.source.name);
+  }
 
   clearCellCache(pane.id);
   closePane(pane);
@@ -275,7 +333,7 @@ function removeFocusedPane() {
   scrollLastBaseY.splice(focusedIndex, 1);
 
   if (panes.length === 0) {
-    if (!tagMode && !showingSessionPicker) {
+    if (autoTagMode && !showingSessionPicker) {
       // Reopen the picker instead of exiting. Explicit quit is ^] q.
       openSessionPicker();
       return;
@@ -319,6 +377,19 @@ function detach() {
     process.stdout.write("\x1b[<u");
   }
   proxiedKittyFlags = [];
+
+  // Best-effort: strip the layout tag from every session-backed pane
+  // so the session drops out of views. If this process is SIGKILL'd
+  // before we reach here, `pty gc` prunes the orphaned `:l<pid>-<rand>`
+  // tags on the next run. Fire-and-forget — we're exiting anyway.
+  if (autoTagMode && layoutTagKey) {
+    for (const pane of panes) {
+      if (pane.source.type === "session") {
+        try { updateTags(pane.source.name, {}, [layoutTagKey]); } catch {}
+      }
+    }
+  }
+
   // Detach: release handles but don't kill processes.
   // For attached sessions, handle.kill() sends detach (not terminate).
   // For local createPty processes, they'll be cleaned up when our process exits.
@@ -340,7 +411,11 @@ function openSessionPicker() {
   prevBuffer = null;
   scheduleRender();
 
-  refreshPicker(tagFilters, (state) => {
+  // Picker shows ALL local/remote sessions, not just ones already
+  // carrying our tag. The picker flow is "select a session to PULL into
+  // this layout" — we'll apply the layout tag on selection. Filtering
+  // here would just hide the candidates the user is trying to pull in.
+  refreshPicker([], (state) => {
     if (showingSessionPicker) {
       // Preserve current filter and selection if user already typed
       if (pickerState && pickerState.filter.length > 0) {
@@ -370,14 +445,13 @@ async function selectPickerItem() {
 
   switch (item.type) {
     case "create-local": {
-      const tags = tagMode
-        ? Object.fromEntries(tagFilters.filter((f) => f.value !== undefined).map((f) => [f.key, f.value!]))
-        : undefined;
-      // Always use the user's $SHELL. Fall back to /bin/bash only when
-      // it's unset (rare). Never hardcode /bin/bash over $SHELL — Apple's
-      // /bin/bash 3.2.57 fails to load modern bash_completion, so Homebrew
-      // bash 5.x users at /opt/homebrew/bin/bash would silently lose
-      // __git_ps1 and similar helpers.
+      // Always stamp the subscription's tags on the new session so that
+      // the TagSubscription's event-follower picks up session_start and
+      // auto-adds the pane. No `create-local` attach-eagerly branch —
+      // the subscription is the single source of truth for panes now.
+      const tags = Object.fromEntries(
+        tagFilters.filter((f) => f.value !== undefined).map((f) => [f.key, f.value!]),
+      );
       const userShell = (process.env.SHELL && process.env.SHELL.length > 0)
         ? process.env.SHELL
         : "/bin/bash";
@@ -390,15 +464,6 @@ async function selectPickerItem() {
       // use execvp directly (like Claude Code's tmux spawner) hit PATH
       // lookup instead. Fix: spawn the shell with rcfile/ZDOTDIR that
       // re-prepends PATH AFTER the user's normal rc runs.
-      //
-      // Per-shell strategy:
-      //   bash → --rcfile <wrapper> (sources user's .bashrc then fixes PATH)
-      //   zsh  → ZDOTDIR=<shim>/shell-init (wrapper .zshrc does the same)
-      //   fish → spawn directly; PATH from buildShimEnv is our best shot.
-      //          Fish has no --rcfile/ZDOTDIR equivalent. If user's
-      //          config.fish re-prepends to PATH, they need to add a
-      //          one-liner to config.fish. Documented in agent-teams.md.
-      //   other → spawn directly, rely on PATH from buildShimEnv.
       let command = userShell;
       let shellArgs: string[] = [];
       let env: Record<string, string> | undefined;
@@ -411,9 +476,10 @@ async function selectPickerItem() {
         } else if (shellBase === "bash") {
           shellArgs = ["--rcfile", path.join(shellInit, "bashrc"), "-i"];
         }
-        // fish and unknown shells: no wrapper, just $SHELL with env
       }
 
+      // User asked for this session — mark for focus-on-arrival.
+      focusOnAddNames.add(name);
       try {
         await spawnDaemon({
           name,
@@ -424,18 +490,22 @@ async function selectPickerItem() {
           tags,
           ...(env ? { env } : {}),
         });
-        if (!tagMode) {
-          const pane = await createAttachPane(name);
-          addPane(pane);
-        }
-        // In tag mode, EventFollower handles add
+        // The subscription's event follower will see session_start and
+        // add the pane. Nothing to do here on success.
       } catch (err) {
+        focusOnAddNames.delete(name);
         process.stderr.write(`pty-layout: failed to create session: ${(err as Error).message}\n`);
         openSessionPicker();
       }
       break;
     }
     case "create-remote": {
+      // Remote sessions remain local-process panes (pty-relay connect).
+      // They don't participate in the tag system — a remote session
+      // lives in a different daemon and would need a cross-daemon tag
+      // RPC to be subscribed-to. For now, carry the layout's tag as
+      // `--tag` args so the remote session is tagged on the remote end
+      // (useful if someone else is watching that tag over there).
       const tagArgs = tagFilters
         .filter((f) => f.value !== undefined)
         .flatMap((f) => ["--tag", `${f.key}=${f.value}`]);
@@ -450,12 +520,28 @@ async function selectPickerItem() {
       break;
     }
     case "local": {
+      // Apply the layout's tag to the existing session so it becomes
+      // part of this layout's subscription. In auto-tag mode (we own
+      // the tag), this is harmless — only this layout watches for it.
+      // In explicit --tag mode, the tag key is the user's choice and
+      // applying it makes the session visible to other layouts watching
+      // that same tag (intentional: shared workspace).
+      const sessionName = item.sessionName!;
       try {
-        const pane = await createAttachPane(item.sessionName!);
-        if (tagSubscription) tagSubscription.track(item.sessionName!);
+        const tags = Object.fromEntries(
+          tagFilters.filter((f) => f.value !== undefined).map((f) => [f.key, f.value!]),
+        );
+        if (Object.keys(tags).length > 0) {
+          await updateTags(sessionName, tags, []);
+        }
+        // Eager pane add — updateTags doesn't emit a session_start event,
+        // so the subscription wouldn't pick this session up. Track it
+        // explicitly, attach now.
+        const pane = await createAttachPane(sessionName);
+        if (tagSubscription) tagSubscription.track(sessionName);
         addPane(pane);
       } catch (err) {
-        process.stderr.write(`pty-layout: failed to attach to ${item.sessionName}: ${(err as Error).message}\n`);
+        process.stderr.write(`pty-layout: failed to attach to ${sessionName}: ${(err as Error).message}\n`);
         openSessionPicker();
       }
       break;
@@ -650,8 +736,10 @@ function handleStdin(data: Buffer) {
         break;
 
       case "closePane":
-        if (tagMode) {
-          // In tag mode, panes reflect tagged sessions — can't close
+        if (!autoTagMode) {
+          // Explicit --tag mode: the tag is user-owned and shared with
+          // other pty-layouts. Closing via untag would silently evict
+          // the session from everyone else's view. Disabled.
           break;
         }
         removeFocusedPane();
@@ -763,18 +851,30 @@ function handleStdin(data: Buffer) {
 
         selection.active = false;
 
-        if (hasDragDistance(selection) && upPane) {
+        if (hasDragDistance(selection) && upPane && !upPane.handle.exited) {
           // Copy selected text to clipboard via OSC 52. Use the wrapped
           // flags so long lines that were visually wrapped by xterm
           // round-trip as single logical lines (URLs, JSON, commands)
           // instead of getting spurious \n at each row boundary.
-          const cells = upPane.handle.readCells(selection.scrollOffset);
-          const wrapped = upPane.handle.readWrappedFlags(selection.scrollOffset);
-          const text = extractSelectedText(cells, selection, wrapped);
-          if (text.length > 0) {
-            process.stdout.write(copyToClipboard(text));
+          //
+          // Reading cells/flags can throw if the pane's terminal was
+          // disposed between mousedown and mouseup (e.g. the session
+          // exited mid-drag). Swallow the error and keep the selection
+          // state clean rather than crashing the whole app.
+          try {
+            const cells = upPane.handle.readCells(selection.scrollOffset);
+            const wrapped = typeof upPane.handle.readWrappedFlags === "function"
+              ? upPane.handle.readWrappedFlags(selection.scrollOffset)
+              : undefined;
+            const text = extractSelectedText(cells, selection, wrapped);
+            if (text.length > 0) {
+              process.stdout.write(copyToClipboard(text));
+            }
+            // Keep selection visible (highlight stays until next click)
+          } catch {
+            // Pane disposed mid-drag; just drop the selection.
+            selection = null;
           }
-          // Keep selection visible (highlight stays until next click)
         } else {
           // Just a click, no drag — clear selection
           selection = null;
@@ -830,9 +930,10 @@ function handleStdin(data: Buffer) {
       }
 
       case "detach":
-        // Ctrl+\ detaches from the focused pane. With no panes in non-tag
-        // mode, there's nothing to detach from — interpret as quit.
-        if (tagMode) break;
+        // Ctrl+\ removes the focused pane from the layout (in auto-tag
+        // mode, via untag). Empty state quits the app. In explicit --tag
+        // mode, detaching would evict from everyone's view — disabled.
+        if (!autoTagMode) break;
         if (panes.length === 0) {
           detach();
           process.exit(0);
@@ -852,9 +953,10 @@ function handleStdin(data: Buffer) {
 
 // --- CLI arg parsing ---
 
-type PaneSpec =
-  | { type: "local"; command: string; args: string[] }
-  | { type: "attach"; name: string };
+interface PaneSpec {
+  command: string;
+  args: string[];
+}
 
 interface ParsedArgs {
   specs: PaneSpec[];
@@ -885,12 +987,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       i += 2;
     } else {
       const arg = argv[i]!;
-      if (arg.startsWith("@")) {
-        specs.push({ type: "attach", name: arg.slice(1) });
-      } else {
-        const parts = arg.split(/\s+/);
-        specs.push({ type: "local", command: parts[0]!, args: parts.slice(1) });
-      }
+      const parts = arg.split(/\s+/);
+      specs.push({ command: parts[0]!, args: parts.slice(1) });
       i++;
     }
   }
@@ -905,7 +1003,7 @@ function renderEmptyState(totalRows: number, totalCols: number): void {
 
   if (!showingSessionPicker) {
     let label: string;
-    if (tagMode) {
+    if (!autoTagMode) {
       label = `Watching for sessions tagged ${formatTagFilters(tagFilters)}...`;
     } else {
       label = `^] n to open session picker`;
@@ -916,8 +1014,9 @@ function renderEmptyState(totalRows: number, totalCols: number): void {
   }
 
   // Status bar
+  const badge = formatLayoutBadge(tagFilters, layoutTagKey);
   const left = " ^] command key | ^\\ detach pane";
-  const right = ` 0/0 grid `;
+  const right = ` ${badge ? badge + " " : ""}0/0 grid `;
   const leftLen = visibleLength(left);
   const rightLen = visibleLength(right);
   const pad = Math.max(totalCols - leftLen - rightLen, 0);
@@ -932,47 +1031,98 @@ function renderEmptyState(totalRows: number, totalCols: number): void {
     renderSessionPicker(buf, pickerState, totalRows, totalCols);
   } else if (isPrefixPending()) {
     // Prefix overlay in the empty state — so ^] shows the help modal
-    renderPrefixOverlay(buf, totalRows, totalCols, false, tagMode);
+    renderPrefixOverlay(buf, totalRows, totalCols, false, !autoTagMode);
   }
 
   process.stdout.write(fullRender(buf));
 }
 
+// --- Subcommand: pty-layout new ---
+
+async function runNewSubcommand(argv: string[]): Promise<number> {
+  let parsed;
+  try {
+    parsed = parseNewSubcommand(argv);
+  } catch (err) {
+    process.stderr.write(`${(err as Error).message}\n`);
+    return 2;
+  }
+
+  const filterEnv = process.env.PTY_LAYOUT_FILTER_TAG ?? "";
+  if (!filterEnv.trim()) {
+    process.stderr.write(
+      "pty-layout new: $PTY_LAYOUT_FILTER_TAG is not set. " +
+      "This command is meant to be run inside a pty-layout session — it spawns a new tagged daemon session that the layout will pick up.\n",
+    );
+    return 1;
+  }
+
+  const tags = parseFilterTagEnv(filterEnv);
+  if (Object.keys(tags).length === 0) {
+    process.stderr.write(
+      "pty-layout new: $PTY_LAYOUT_FILTER_TAG has no key=value entries. " +
+      "The layout was started with key-only filters; this subcommand needs concrete values to apply.\n",
+    );
+    return 1;
+  }
+
+  const command = parsed.command
+    ?? (process.env.SHELL && process.env.SHELL.length > 0 ? process.env.SHELL : "/bin/bash");
+  const args = parsed.args;
+  const name = parsed.name ?? randomSessionId();
+  const cwd = parsed.cwd ?? (process.env.HOME ?? process.cwd());
+  const displayCommand = args.length > 0 ? `${command} ${args.join(" ")}` : command;
+
+  try {
+    await spawnDaemon({ name, command, args, displayCommand, cwd, tags });
+  } catch (err) {
+    process.stderr.write(`pty-layout new: ${(err as Error).message}\n`);
+    return 1;
+  }
+
+  // Print the session name so scripts can use it (mirrors `pty run`'s
+  // stdout contract — one line, session name, nothing else).
+  process.stdout.write(name + "\n");
+  return 0;
+}
+
 // --- Main ---
 
 async function main() {
+  // Subcommand dispatch — before we touch the TTY or spawn anything.
+  const rawArgs = process.argv.slice(2);
+  if (rawArgs[0] === "new") {
+    const code = await runNewSubcommand(rawArgs.slice(1));
+    process.exit(code);
+  }
+
   const parsed = parseArgs(process.argv.slice(2));
-  tagFilters = parsed.tagFilters;
   tmuxMode = parsed.tmux;
   enabledLayouts = parsed.layouts;
-  // --tmux without --tag: auto-generate a unique tag so the shim's
-  // spawn-path (split-window, list-panes, etc.) has something to scope
-  // sessions to. Without this, the shim would error on every spawn.
-  if (tmuxMode && tagFilters.length === 0) {
-    tagFilters = [{ key: "tmux", value: randomSessionId() }];
-  }
-  tagMode = tagFilters.length > 0;
 
-  // Create initial panes from explicit specs
-  for (const spec of parsed.specs) {
-    let pane: Pane;
-    if (spec.type === "attach") {
-      pane = await createAttachPane(spec.name);
-    } else {
-      pane = createLocalPane(spec.command, spec.args);
-    }
-    pane.handle.onActivity = () => {
-      const urgent = panes[focusedIndex] === pane && expectingFocusedEcho;
-      if (urgent) expectingFocusedEcho = false;
-      scheduleRender(urgent);
-      if (pane.handle.exited) {
-        setTimeout(() => removePane(pane), 50);
-      }
-    };
-    panes.push(pane);
-    scrollOffsets.push(0);
-    scrollLastBaseY.push(pane.handle.baseY);
+  // Tag mode selection. Auto-tag is the default — pty-layout owns a
+  // random `:l<pid>-<rand>` key and uses it to track which sessions are
+  // in its view. Explicit --tag is shared-workspace mode, read-only.
+  if (parsed.tagFilters.length > 0) {
+    tagFilters = parsed.tagFilters;
+    autoTagMode = false;
+    layoutTagKey = null;
+  } else {
+    layoutTagKey = newLayoutTagKey();
+    tagFilters = [{ key: layoutTagKey, value: "1" }];
+    autoTagMode = true;
   }
+
+  // Expose the filter string to every child of pty-layout via env. This
+  // is how `pty-layout new` (and the tmux shim, and anything the user
+  // writes) discovers the layout scope. Setting on our own process.env
+  // means all spawned daemons inherit it; daemons' child shells inherit
+  // from them; and so on.
+  process.env.PTY_LAYOUT_FILTER_TAG = formatTagFilters(tagFilters);
+
+  // --tmux needs the layout tag in its env so the shim's spawn-path
+  // (split-window, list-panes) has something to scope to. Works in
+  // both auto and explicit modes now since we always have a filter.
 
   // Set up terminal
   running = true;
@@ -1013,38 +1163,75 @@ async function main() {
   });
   process.on("exit", detach);
 
-  // Start tag subscription if in tag mode
-  if (tagMode) {
-    tagSubscription = new TagSubscription(tagFilters, {
-      onAdd: async (sessionName) => {
-        try {
-          const pane = await createAttachPane(sessionName);
-          addPane(pane);
-        } catch {
-          // Session may have disappeared between event and attach
-        }
-      },
-      onRemove: (sessionName) => {
-        const pane = panes.find(
-          (p) => p.source.type === "session" && p.source.name === sessionName,
-        );
-        if (pane) removePane(pane);
-      },
-    });
-
-    const initialSessions = await tagSubscription.start();
-    for (const name of initialSessions) {
+  // Tag subscription is always on now. In explicit --tag mode it
+  // watches shared-workspace sessions. In auto-tag mode it watches
+  // sessions this layout has tagged (mostly itself-created).
+  tagSubscription = new TagSubscription(tagFilters, {
+    onAdd: async (sessionName) => {
+      // Focus rule: only focus the new pane when the user explicitly
+      // initiated it (picker + New session). Everything else — CLI
+      // startup specs, tmux shim teammates, external tagged sessions —
+      // comes in without focus-stealing so the user stays put.
+      startupPendingNames.delete(sessionName);
+      const shouldFocus = focusOnAddNames.delete(sessionName);
       try {
-        const pane = await createAttachPane(name);
-        addPane(pane);
+        const pane = await createAttachPane(sessionName);
+        addPane(pane, { focus: shouldFocus });
       } catch {
-        // Session may have disappeared
+        // Session may have disappeared between event and attach
       }
+    },
+    onRemove: (sessionName) => {
+      const pane = panes.find(
+        (p) => p.source.type === "session" && p.source.name === sessionName,
+      );
+      if (pane) removePane(pane);
+    },
+  });
+
+  const initialSessions = await tagSubscription.start();
+  for (const name of initialSessions) {
+    try {
+      const pane = await createAttachPane(name);
+      // Hydration: don't let each initial session fight the others for
+      // focus. Focus will land on index 0 after they're all added.
+      addPane(pane, { focus: false });
+    } catch {
+      // Session may have disappeared
     }
   }
 
-  // Open picker on startup if no panes and not in tag mode
-  if (panes.length === 0 && !tagMode) {
+  // CLI bare commands (e.g. `pty-layout bash bash`) spawn daemon
+  // sessions tagged into this layout. The subscription's event follower
+  // picks up each session_start and adds the pane.
+  const cliTags = Object.fromEntries(
+    tagFilters.filter(f => f.value !== undefined).map(f => [f.key, f.value!]),
+  );
+  for (const spec of parsed.specs) {
+    try {
+      const name = randomSessionId();
+      // Mark this session name so onAdd keeps focus on pane 1 when its
+      // session_start event comes through. Remove only on failure —
+      // success leaves it to be consumed by onAdd.
+      startupPendingNames.add(name);
+      const displayCmd = spec.args.length > 0 ? `${spec.command} ${spec.args.join(" ")}` : spec.command;
+      await spawnDaemon({
+        name,
+        command: spec.command,
+        args: spec.args,
+        displayCommand: displayCmd,
+        cwd: process.env.HOME ?? process.cwd(),
+        tags: cliTags,
+      });
+    } catch (err) {
+      process.stderr.write(`pty-layout: failed to spawn "${spec.command}": ${(err as Error).message}\n`);
+    }
+  }
+
+  // Auto-open picker on startup when the layout is empty AND we're in
+  // auto-tag mode. Explicit --tag mode starts in "watching" empty state
+  // so a passive workspace observer doesn't get surprised by a modal.
+  if (panes.length === 0 && autoTagMode && parsed.specs.length === 0) {
     openSessionPicker();
   }
 
@@ -1054,7 +1241,7 @@ async function main() {
     {
       args: process.argv.slice(2),
       initialPanes: panes.length,
-      tagMode,
+      tagMode: true,
     },
     {
       id: launchId,

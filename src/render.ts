@@ -68,7 +68,8 @@ export function renderFrame(
   selection?: SelectionState | null,
   sessionPicker?: PickerState | null,
   moveMode: boolean = false,
-  tagMode: boolean = false,
+  readOnlyTagMode: boolean = false,
+  layoutBadge: string = "",
 ): { output: string; buffer: CellBuffer } {
   const buf = new CellBuffer(totalRows, totalCols);
 
@@ -188,14 +189,14 @@ export function renderFrame(
   }
 
   // Status bar at bottom row
-  renderStatusBar(buf, totalRows, totalCols, layoutMode, focusedIndex, panes.length);
+  renderStatusBar(buf, totalRows, totalCols, layoutMode, focusedIndex, panes.length, layoutBadge);
 
   // Overlays
   if (sessionPicker) {
     renderSessionPicker(buf, sessionPicker, totalRows, totalCols);
   } else if (prefixActive) {
     renderPaneBadges(buf, visible);
-    renderPrefixOverlay(buf, totalRows, totalCols, moveMode, tagMode);
+    renderPrefixOverlay(buf, totalRows, totalCols, moveMode, readOnlyTagMode);
   }
 
   // Diff against previous buffer
@@ -221,9 +222,11 @@ function renderStatusBar(
   layoutMode: LayoutMode,
   focusedIndex: number,
   paneCount: number,
+  layoutBadge: string = "",
 ): void {
   const left = " ^] command key | ^\\ detach pane";
-  const right = ` ${focusedIndex + 1}/${paneCount} ${MODE_LABELS[layoutMode]} `;
+  const badge = layoutBadge ? `${layoutBadge} ` : "";
+  const right = ` ${badge}${focusedIndex + 1}/${paneCount} ${MODE_LABELS[layoutMode]} `;
 
   // Pad to fill the row
   const leftLen = visibleLength(left);

@@ -224,6 +224,33 @@ describe("extractSelectedText", () => {
       const text = extractSelectedText(urlGrid, sel(1, 0, 2, 8), [false, true, true]);
       expect(text).toBe("ample.com/long/path");
     });
+
+    it("wrapped[] shorter than cells[] — out-of-bounds treated as not-wrapped", () => {
+      // Defensive: if the flags array comes back shorter than the cell
+      // grid for any reason (resize race, pane disposed mid-call), we
+      // must not crash and must fall back to inserting newlines.
+      const text = extractSelectedText(urlGrid, sel(0, 0, 2, 8), [false]);
+      expect(text).toBe("https://ex\nample.com/\nlong/path");
+    });
+
+    it("wrapped[] longer than cells[] — extra entries ignored", () => {
+      const tooLong = [false, true, true, true, true, true, true];
+      const text = extractSelectedText(urlGrid, sel(0, 0, 2, 8), tooLong);
+      expect(text).toBe("https://example.com/long/path");
+    });
+
+    it("selection past cells[] bounds doesn't crash", () => {
+      // sel end row is beyond cells.length — gracefully produce what
+      // we can, with \n for missing rows.
+      const text = extractSelectedText(urlGrid, sel(0, 0, 5, 3), [false]);
+      expect(text.length).toBeGreaterThan(0);
+      expect(text).toContain("https://ex");
+    });
+
+    it("empty cells grid + any selection doesn't crash", () => {
+      const text = extractSelectedText([], sel(0, 0, 5, 10), []);
+      expect(text).toBe("\n\n\n\n\n");
+    });
   });
 });
 

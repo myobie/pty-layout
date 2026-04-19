@@ -72,6 +72,18 @@ export class TagSubscription {
     this.tracked.add(sessionName);
   }
 
+  /** Drop a session from the tracked set. Used when pty-layout removes
+   *  its own tag from a session (close-pane) — without this, a later
+   *  re-add would be blocked by the tracked-set guard on session_start. */
+  untrack(sessionName: string): void {
+    this.tracked.delete(sessionName);
+  }
+
+  /** Is this session currently tracked? */
+  isTracked(sessionName: string): boolean {
+    return this.tracked.has(sessionName);
+  }
+
   private handleEvent(event: EventRecord): void {
     if (event.type === "session_start") {
       const { session, tags } = event;

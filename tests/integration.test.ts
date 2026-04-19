@@ -96,6 +96,12 @@ afterEach(async () => {
     await session.close();
     await new Promise((r) => setTimeout(r, 500));
   }
+  // Kill any daemon sessions left behind. The new always-tag
+  // architecture spawns daemons for every pane (local panes don't
+  // exist any more), so every test leaks 1-2+ sessions unless we
+  // actively clean them up. Scoped to PTY_SESSION_DIR so we can't
+  // touch the user's real sessions.
+  await killAllTestSessions();
 });
 
 // Belt-and-suspenders: even if a test throws, the file-level afterAll
@@ -134,7 +140,8 @@ describe("startup and status bar", () => {
 describe("border colors", () => {
   it("focused pane has green border, unfocused has grey", async () => {
     startApp(["bash", "bash"]);
-    await session.waitForText("1:", 15000);
+    // Wait for both panes to attach (subscription fires async now)
+    await session.waitForText("1/2", 15000);
     const ss = session.screenshot();
     expect(ss.ansi).toContain("38;2;80;200;120");
     expect(ss.ansi).toContain("38;2;100;100;100");
@@ -197,6 +204,152 @@ describe("pane management", () => {
     // Keystrokes should route to the remaining pane, not be eaten
     session.type("echo still-alive\r");
     await session.waitForText("still-alive", 5000);
+  }, 20000);
+
+  it("auto-tag close: ^]w removes layout tag but session keeps running", async () => {
+    // The defining property of auto-tag mode: closing a pane doesn't
+    // kill the session, just untags it. We can prove this by running
+    // another pty-layout (with --tag pointing at the same random key)
+    // and confirming the session shows up there — but a simpler check
+    // is: after ^]w, listSessions still shows the session as running.
+    startApp(["bash", "bash"]);
+    await session.waitForText("1/2", 15000);
+
+    // Grab the session names from pty list before close
+    const beforeCount = (await listSessions()).filter(s => s.status === "running").length;
+
+    prefixKey("w");
+    await session.waitForText("1/1", 10000);
+
+    // Session count unchanged — close = untag, not kill.
+    // Wait a bit for updateTags to fire.
+    await new Promise(r => setTimeout(r, 500));
+    const afterCount = (await listSessions()).filter(s => s.status === "running").length;
+    expect(afterCount).toBe(beforeCount);
+  }, 30000);
+
+  it("^]\\ removes the focused pane in auto-tag mode (same as ^]w)", async () => {
+    startApp(["bash", "bash"]);
+    await session.waitForText("1/2", 15000);
+    session.sendKeys("\x1c");
+    await session.waitForText("1/1", 10000);
+  }, 20000);
+});
+
+describe("auto-tag mode", () => {
+  it("status bar shows a [badge] for the layout", async () => {
+    startApp(["bash"]);
+    await session.waitForText("1/1", 15000);
+    const ss = session.screenshot();
+    // Badge: [abcxyz12] — 8 lowercase alphanumeric chars in brackets
+    expect(ss.text).toMatch(/\[[a-z0-9]{8}\]/);
+  }, 20000);
+
+  it("picker can pick an untagged existing session and pull it in", async () => {
+    // Spawn an UNTAGGED daemon session externally. Picker should list
+    // it (all sessions, not filtered by layout's random tag), pick
+    // applies the tag, pane appears.
+    const name = `pull-test-${Date.now()}`;
+    await spawnDaemon({ name, command: "bash", args: [], displayCommand: "bash" });
+    await new Promise(r => setTimeout(r, 500));
+
+    startApp();
+    await session.waitForText("Sessions", 15000);
+    session.type(name);
+    await new Promise(r => setTimeout(r, 300));
+    session.sendKeys("\r");
+    await session.waitForText("1/1", 10000);
+
+    // The session name should be in the pane title
+    const ss = session.screenshot();
+    expect(ss.text).toContain(name);
+  }, 25000);
+
+  it("empty layout on startup auto-opens the picker", async () => {
+    startApp();
+    await session.waitForText("Sessions", 15000);
+  }, 20000);
+});
+
+describe("pty-layout new (subcommand)", () => {
+  it("errors when $PTY_LAYOUT_FILTER_TAG is unset", async () => {
+    // Run the subcommand directly in an isolated PTY (not inside a
+    // pty-layout shell). $PTY_LAYOUT_FILTER_TAG is not set, so it
+    // should error with a clear message.
+    session = Session.spawn(
+      "node",
+      ["--experimental-strip-types", "--no-warnings", mainScript, "new", "--", "bash"],
+      { rows: 10, cols: 80, env: { TERM: "xterm-256color", HOME: process.env.HOME! } },
+    );
+    await session.waitForText("PTY_LAYOUT_FILTER_TAG is not set", 10000);
+  }, 15000);
+
+  it("errors on unknown flag", async () => {
+    session = Session.spawn(
+      "node",
+      ["--experimental-strip-types", "--no-warnings", mainScript, "new", "--bogus"],
+      { rows: 10, cols: 80, env: { TERM: "xterm-256color" } },
+    );
+    await session.waitForText("unknown flag", 10000);
+  }, 15000);
+
+  it("spawns a session with the layout's tag — appears as a pane", async () => {
+    // Full end-to-end: start a layout, pick "+ New session" to get a
+    // shell with $PTY_LAYOUT_FILTER_TAG set, then run `pty-layout new`
+    // from that shell. The new session should appear in the layout.
+    startApp();
+    await session.waitForText("Sessions", 15000);
+    session.sendKeys("\r"); // pick "+ New session"
+    await session.waitForText("1/1", 15000);
+    await new Promise(r => setTimeout(r, 500));
+
+    // Node binary path so we can invoke main.ts from within the pane
+    const nodeBin = process.execPath;
+    const cmd = `${nodeBin} --experimental-strip-types --no-warnings ${mainScript} new -- bash -c 'echo FROM-NEW; sleep 30'`;
+    session.type(cmd + "\r");
+
+    // Focus moves to the newly-spawned session (it's picker-ish:
+    // subscription event-driven adds that weren't flagged for focus
+    // DON'T steal focus — but `new` isn't in focusOnAddNames either).
+    // We just check the pane count jumps to 2.
+    await session.waitForText("1/2", 15000);
+
+    // And the spawned command's output shows somewhere
+    await session.waitForText("FROM-NEW", 10000);
+  }, 40000);
+});
+
+describe("explicit --tag mode (read-only)", () => {
+  it("^]w is disabled in explicit --tag mode", async () => {
+    const tag = `readonly-${Date.now()}`;
+    // Pre-create a session tagged with our filter, so the layout has
+    // something to show.
+    const name = `ro-${Date.now()}`;
+    await spawnDaemon({
+      name,
+      command: "bash",
+      args: [],
+      displayCommand: "bash",
+      tags: { project: tag },
+    });
+    await new Promise(r => setTimeout(r, 500));
+
+    startApp(["--tag", `project=${tag}`]);
+    await session.waitForText("1/1", 15000);
+
+    // ^]w should be a no-op: pane count stays at 1/1
+    prefixKey("w");
+    await new Promise(r => setTimeout(r, 500));
+    const ss = session.screenshot();
+    expect(ss.text).toContain("1/1");
+  }, 25000);
+
+  it("status bar shows the explicit tag filter in the badge", async () => {
+    const tag = `badgetest-${Date.now()}`;
+    startApp(["--tag", `project=${tag}`]);
+    await session.waitForText("Watching for sessions tagged", 15000);
+    const ss = session.screenshot();
+    expect(ss.text).toContain(`[project=${tag}]`);
   }, 20000);
 });
 
@@ -608,6 +761,75 @@ describe("session picker", () => {
     session.sendKeys("\x1b");
     await session.waitForAbsent("Sessions", 5000);
   }, 20000);
+
+  it("^]n + New session focuses the newly-created pane", async () => {
+    // Regression: subscription-driven adds used to NOT move focus, so
+    // new panes opened via the picker landed unfocused. The user's
+    // intent — they explicitly asked for a new pane — is to see it
+    // right away.
+    startApp(["bash"]);
+    await session.waitForText("1/1", 15000);
+    await new Promise(r => setTimeout(r, 500));
+
+    // Put a marker in pane 1 so we can confirm pane 2 becomes focused
+    session.type("echo PANE-ONE\r");
+    await session.waitForText("PANE-ONE", 5000);
+
+    // Open picker, hit Enter on the default "+ New session" item
+    prefixKey("n");
+    await session.waitForText("Sessions", 5000);
+    session.sendKeys("\r");
+
+    // Focus should be on the NEW pane (pane 2). We wait for "2/2"
+    // directly — the transition through "1/2" isn't observable because
+    // focus moves atomically with the pane-add.
+    await session.waitForText("2/2", 15000);
+
+    // Type something — it should land in the new pane, not pane 1
+    await new Promise(r => setTimeout(r, 500));
+    session.type("echo NEW-PANE-FOCUSED\r");
+    await session.waitForText("NEW-PANE-FOCUSED", 5000);
+  }, 25000);
+
+  it("subscription-triggered external session does NOT steal focus", async () => {
+    // Counterpart: when a session is tagged into our view from OUTSIDE
+    // (e.g. the tmux shim's split-window, or another tool), we should
+    // add the pane at the end but keep user focus where it was.
+    startApp(["bash"]);
+    await session.waitForText("1/1", 15000);
+    await new Promise(r => setTimeout(r, 500));
+
+    // Grab the layout tag from the status bar badge
+    const ss1 = session.screenshot();
+    const m = ss1.text.match(/\[([a-z0-9]{8})\]/);
+    expect(m).not.toBeNull();
+    const suffix = m![1]!;
+
+    // Find the full key by listing sessions and reading their tags
+    const sessions = await listSessions();
+    const running = sessions.find(s => s.status === "running" && s.metadata?.tags
+      && Object.keys(s.metadata.tags).some(k => k.endsWith(`-${suffix}`)));
+    expect(running).toBeDefined();
+    const tagKey = Object.keys(running!.metadata!.tags!)
+      .find(k => k.endsWith(`-${suffix}`))!;
+
+    // Externally spawn a NEW session and apply the layout's tag to it.
+    // The subscription should pick it up and add a pane — focus stays on 1.
+    const externalName = `ext-${Date.now()}`;
+    await spawnDaemon({
+      name: externalName,
+      command: "bash",
+      args: [],
+      displayCommand: "bash",
+      tags: { [tagKey]: "1" },
+    });
+
+    // Wait for 2 panes
+    await session.waitForText("1/2", 15000);
+    // Focus should STILL be on 1, not auto-moved to 2
+    const ss2 = session.screenshot();
+    expect(ss2.text).toContain("1/2");
+  }, 25000);
 });
 
 describe("text selection", () => {
@@ -651,6 +873,71 @@ describe("text selection", () => {
     session.sendKeys(`\x1b[<0;${startCol};${startRow}m`);
     await new Promise(r => setTimeout(r, 200));
   }, 20000);
+
+  it("selection survives pane exit mid-drag without crashing", async () => {
+    // Reproduce the crash pattern: start a drag, let the focused pane's
+    // session exit during the drag (or before mouseup), then release.
+    // The readCells/readWrappedFlags calls in mouseUp see a disposed
+    // terminal if the timing is wrong. With the defensive try/catch in
+    // the mouseUp handler, the app should stay alive and the status
+    // bar should still be rendering.
+    startApp(["bash", "bash"]);
+    await session.waitForText("1/2", 15000);
+    await new Promise(r => setTimeout(r, 500));
+
+    // Focus pane 2 and put something on screen
+    prefixKey("2");
+    await session.waitForText("2/2", 5000);
+    session.type("echo CANARY\r");
+    await session.waitForText("CANARY", 5000);
+
+    // Start a drag in pane 2's area (approx — layout is 2 side-by-side
+    // at the default 30x100). We use SGR mouse coords; exact pane
+    // boundary isn't important, as long as we hit inside a pane.
+    const panesStart = 3;
+    session.sendKeys(`\x1b[<0;${60};${panesStart}M`);
+    session.sendKeys(`\x1b[<32;${70};${panesStart}M`);
+
+    // While the drag is in flight, exit the focused pane's session.
+    // That fires session_exit → removePane → handle.kill() → terminal
+    // .dispose(). Subsequent readCells would throw on a disposed buffer.
+    session.type("exit\r");
+    await session.waitForText("1/1", 5000);
+
+    // Now release the mouse. The pane index the selection captured may
+    // no longer be valid; without the defensive guard this was crashing.
+    session.sendKeys(`\x1b[<0;${70};${panesStart}m`);
+
+    // App still alive — type a command, see its echo.
+    await new Promise(r => setTimeout(r, 200));
+    session.type("echo STILL-ALIVE\r");
+    await session.waitForText("STILL-ALIVE", 5000);
+  }, 30000);
+
+  it("selection into an exited pane via mouseup doesn't crash", async () => {
+    // Variant: both mousedown and mouseup land on a pane whose session
+    // has already exited but is mid-removal.
+    startApp(["bash"]);
+    await session.waitForText("1/1", 15000);
+    await new Promise(r => setTimeout(r, 500));
+
+    session.type("echo BEFORE-EXIT\r");
+    await session.waitForText("BEFORE-EXIT", 5000);
+
+    // Exit the session
+    session.type("exit\r");
+    // Immediately try a drag-select in the pane area while removal is
+    // in progress. There's a small window where the pane is still in
+    // panes[] but the handle is exiting.
+    const r = 3;
+    session.sendKeys(`\x1b[<0;3;${r}M`);
+    session.sendKeys(`\x1b[<32;13;${r}M`);
+    session.sendKeys(`\x1b[<0;13;${r}m`);
+
+    // No assertion on clipboard behavior — just that we survive.
+    // Picker should reopen since pane count dropped to zero.
+    await session.waitForText("Sessions", 10000);
+  }, 25000);
 });
 
 describe("tmux shim mode", () => {
