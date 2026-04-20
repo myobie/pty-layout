@@ -1,22 +1,51 @@
 {
-  "name": "pty-layout",
+  "name": "@myobie/pty-layout",
   "version": "0.1.0",
+  "description": "Terminal multiplexer for @myobie/pty sessions. Tag-driven panes, tmux compatibility shim, agent-team aware.",
   "type": "module",
-  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/myobie/pty-layout.git"
+  },
+  "keywords": [
+    "terminal",
+    "multiplexer",
+    "tmux",
+    "pty",
+    "tui",
+    "layout",
+    "agent-teams"
+  ],
+  "files": [
+    "bin/",
+    "dist/",
+    "shim/",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
   "bin": {
-    "pty-layout": "src/main.ts"
+    "pty-layout": "./bin/pty-layout"
+  },
+  "engines": {
+    "node": ">=25"
   },
   "scripts": {
     "start": "node --experimental-strip-types --no-warnings src/main.ts",
+    "build": "tsc -p tsconfig.build.json && npm run build:shim",
+    "build:shim": "esbuild shim/tmux-main.ts --bundle --platform=node --format=esm --outfile=shim/tmux-main.js && esbuild shim/tmux-log-main.ts --bundle --platform=node --format=esm --outfile=shim/tmux-log-main.js",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build",
+    "typecheck": "tsc",
     "test": "vitest run",
-    "test:watch": "vitest",
-    "typecheck": "tsc"
+    "test:watch": "vitest"
   },
   "dependencies": {
-    "@myobie/pty": "^0.8.0"
+    "@myobie/pty": "^0.9.0"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@types/node": "^25.3.5",
+    "esbuild": "^0.27.4",
     "typescript": "^5.7.0",
     "vitest": "^4.1.1"
   }

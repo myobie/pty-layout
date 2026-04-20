@@ -4,4 +4,8 @@
 # the exact argv/env surface a tool is using. Set $TMUX_SHIM_LOG to
 # override the log path (default /tmp/pty-layout-tmux-shim.log).
 SHIM_DIR="$(cd "$(dirname "$0")" && pwd)"
-exec node --experimental-strip-types --no-warnings "$SHIM_DIR/tmux-log-main.ts" "$@"
+if [ -f "$SHIM_DIR/tmux-log-main.js" ]; then
+  exec node "$SHIM_DIR/tmux-log-main.js" "$@"
+else
+  exec node --experimental-strip-types --no-warnings "$SHIM_DIR/tmux-log-main.ts" "$@"
+fi

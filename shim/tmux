@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # pty-layout tmux shim — translates a subset of tmux commands into pty CLI
 # calls. Installed on PATH inside picker-spawned shells when `pty-layout
-# --tmux` is active. The real work lives in tmux-main.ts.
+# --tmux` is active. Prefers the bundled JS (post-install / post-build);
+# falls back to TS source for dev runs.
 SHIM_DIR="$(cd "$(dirname "$0")" && pwd)"
-exec node --experimental-strip-types --no-warnings "$SHIM_DIR/tmux-main.ts" "$@"
+if [ -f "$SHIM_DIR/tmux-main.js" ]; then
+  exec node "$SHIM_DIR/tmux-main.js" "$@"
+else
+  exec node --experimental-strip-types --no-warnings "$SHIM_DIR/tmux-main.ts" "$@"
+fi
