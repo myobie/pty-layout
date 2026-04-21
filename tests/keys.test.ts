@@ -491,6 +491,27 @@ describe("SGR mouse events", () => {
     expect(actions).toEqual([{ type: "scrollDown", row: 3, col: 5 }]);
   });
 
+  it("shift+click sets shift:true on mouseDown", () => {
+    const write = vi.fn();
+    // Button 0 (left) + shift modifier (4) = 4
+    const actions = processInput(Buffer.from("\x1b[<4;15;10M"), write);
+    expect(actions).toEqual([{ type: "mouseDown", row: 10, col: 15, shift: true }]);
+  });
+
+  it("shift+drag sets shift:true on mouseDrag", () => {
+    const write = vi.fn();
+    // Left button (0) + motion (32) + shift (4) = 36
+    const actions = processInput(Buffer.from("\x1b[<36;20;8M"), write);
+    expect(actions).toEqual([{ type: "mouseDrag", row: 8, col: 20, shift: true }]);
+  });
+
+  it("non-shift click has no shift field (backward compat)", () => {
+    const write = vi.fn();
+    const actions = processInput(Buffer.from("\x1b[<0;5;5M"), write);
+    // toEqual is strict — missing `shift` must stay missing, not false
+    expect(actions).toEqual([{ type: "mouseDown", row: 5, col: 5 }]);
+  });
+
   it("middle and right clicks are ignored", () => {
     const write = vi.fn();
     let actions = processInput(Buffer.from("\x1b[<1;5;3M"), write);

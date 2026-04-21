@@ -747,15 +747,23 @@ function handleStdin(data: Buffer) {
 
 
       case "mouseDown": {
-        // Clear any completed selection
-        if (selection && !selection.active) {
-          selection = null;
-          prevBuffer = null;
-        }
-
         const clickIdx = findPaneAtPosition(action.row!, action.col!);
         if (clickIdx === -1) break;
         const clickPane = panes[clickIdx]!;
+
+        // Shift+click extends an existing selection in the same pane
+        // rather than starting a new one. This lets the user select
+        // text that's larger than a single screen: click to start,
+        // scroll, shift+click to extend the endpoint.
+        const isShiftExtend = !!action.shift
+          && selection
+          && selection.paneIndex === clickIdx;
+
+        if (!isShiftExtend && selection && !selection.active) {
+          // Clear any completed selection
+          selection = null;
+          prevBuffer = null;
+        }
 
         // Focus the pane
         if (clickIdx !== focusedIndex) {
@@ -775,21 +783,36 @@ function handleStdin(data: Buffer) {
             }
           }
         } else {
-          // Start selection
           const clickEntry = lastLayout.find(l => l.paneIndex === clickIdx);
           if (clickEntry) {
             const local = screenToPaneLocal(action.row!, action.col!, clickEntry.rect);
             const clamped = clampToInner(local.row, local.col, clickEntry.rect);
-            selection = {
-              paneId: clickPane.id,
-              paneIndex: clickIdx,
-              scrollOffset: scrollOffsets[clickIdx] ?? 0,
-              startRow: clamped.row,
-              startCol: clamped.col,
-              endRow: clamped.row,
-              endCol: clamped.col,
-              active: true,
-            };
+
+            if (isShiftExtend && selection) {
+              // Extend: move the end to the click position at the
+              // current scroll. Translate click-screen coords back to
+              // the selection's captured scroll frame so the endpoint
+              // tracks content if the user scrolled in between.
+              const deltaScroll = (scrollOffsets[clickIdx] ?? 0) - selection.scrollOffset;
+              selection = {
+                ...selection,
+                endRow: clamped.row - deltaScroll,
+                endCol: clamped.col,
+                active: true,
+              };
+            } else {
+              // Start fresh selection
+              selection = {
+                paneId: clickPane.id,
+                paneIndex: clickIdx,
+                scrollOffset: scrollOffsets[clickIdx] ?? 0,
+                startRow: clamped.row,
+                startCol: clamped.col,
+                endRow: clamped.row,
+                endCol: clamped.col,
+                active: true,
+              };
+            }
           }
         }
         scheduleRender();
@@ -890,10 +913,10 @@ function handleStdin(data: Buffer) {
         if (scrollIdx === -1) break;
         const scrollPane = panes[scrollIdx]!;
 
-        // Clear selection when scrolling the selected pane
-        if (selection && selection.paneIndex === scrollIdx) {
-          selection = null;
-        }
+        // Preserve selection across scroll — selection coords are scroll-
+        // aware (translated via isSelectedAtScroll at render time and the
+        // captured scroll offset at copy time). Users can scroll to reach
+        // content beyond a single screen, then shift-click to extend.
 
         if (scrollPane.handle.mouseMode) {
           // Child wants mouse events — forward translated SGR sequence

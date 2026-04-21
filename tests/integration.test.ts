@@ -279,7 +279,19 @@ describe("pty-layout new (subcommand)", () => {
     session = Session.spawn(
       "node",
       ["--experimental-strip-types", "--no-warnings", mainScript, "new", "--", "bash"],
-      { rows: 10, cols: 80, env: { TERM: "xterm-256color", HOME: process.env.HOME! } },
+      {
+        rows: 10,
+        cols: 80,
+        // Explicitly blank PTY_LAYOUT_FILTER_TAG — Session.spawn merges
+        // opts.env on top of process.env, and if the test runner itself
+        // is inside a pty-layout shell (dev environment), the var leaks
+        // through. The subcommand treats empty-string as "not set."
+        env: {
+          TERM: "xterm-256color",
+          HOME: process.env.HOME!,
+          PTY_LAYOUT_FILTER_TAG: "",
+        },
+      },
     );
     await session.waitForText("PTY_LAYOUT_FILTER_TAG is not set", 10000);
   }, 15000);
@@ -937,6 +949,39 @@ describe("text selection", () => {
     // No assertion on clipboard behavior — just that we survive.
     // Picker should reopen since pane count dropped to zero.
     await session.waitForText("Sessions", 10000);
+  }, 25000);
+
+  it("scrolling does not clear an existing selection", async () => {
+    startApp(["bash"]);
+    await session.waitForText("1/1", 15000);
+    await new Promise(r => setTimeout(r, 500));
+
+    // Produce enough lines so scrollback is non-empty
+    session.type("for i in $(seq 1 50); do echo LINE-$i; done\r");
+    await session.waitForText("LINE-50", 5000);
+    await new Promise(r => setTimeout(r, 300));
+
+    // Start + drag a small selection. Use cells inside the inner area.
+    const r = 5;
+    session.sendKeys(`\x1b[<0;3;${r}M`);
+    session.sendKeys(`\x1b[<32;15;${r}M`);
+    session.sendKeys(`\x1b[<0;15;${r}m`);
+    await new Promise(r => setTimeout(r, 200));
+
+    // Evidence of selection: inverted ANSI (bg swap) somewhere
+    const before = session.screenshot();
+    expect(before.ansi).toContain("48;2;");
+
+    // Scroll up via wheel. Previous behavior cleared the selection;
+    // new behavior preserves it.
+    for (let i = 0; i < 5; i++) {
+      session.sendKeys(`\x1b[<64;10;${r}M`);
+    }
+    await new Promise(r => setTimeout(r, 200));
+
+    // Selection should still be highlighted somewhere on screen
+    const after = session.screenshot();
+    expect(after.ansi).toContain("48;2;");
   }, 25000);
 });
 

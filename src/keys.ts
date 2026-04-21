@@ -19,6 +19,9 @@ export interface Action {
   index?: number;
   row?: number;
   col?: number;
+  /** Mouse modifier: shift held. Used for shift-click to extend a
+   *  selection beyond what a single drag can cover. */
+  shift?: boolean;
 }
 
 // Keys that stay in prefix mode after executing (for repeated navigation).
@@ -173,20 +176,25 @@ export function processInput(
 
         const isScroll = !!(mouse.button & 64);
         const isMotion = !!(mouse.button & 32);
+        const shift = !!(mouse.button & 4);
         const baseButton = mouse.button & 3;
+        // Only include `shift` when true so existing tests that match
+        // action objects without it aren't broken.
+        const mods = shift ? { shift: true } : {};
 
         if (isScroll) {
           actions.push({
             type: baseButton === 0 ? "scrollUp" : "scrollDown",
             row: mouse.row,
             col: mouse.col,
+            ...mods,
           });
         } else if (isMotion && baseButton === 0 && mouse.press) {
-          actions.push({ type: "mouseDrag", row: mouse.row, col: mouse.col });
+          actions.push({ type: "mouseDrag", row: mouse.row, col: mouse.col, ...mods });
         } else if (!isMotion && baseButton === 0 && mouse.press) {
-          actions.push({ type: "mouseDown", row: mouse.row, col: mouse.col });
+          actions.push({ type: "mouseDown", row: mouse.row, col: mouse.col, ...mods });
         } else if (!isMotion && baseButton === 0 && !mouse.press) {
-          actions.push({ type: "mouseUp", row: mouse.row, col: mouse.col });
+          actions.push({ type: "mouseUp", row: mouse.row, col: mouse.col, ...mods });
         }
 
         i += mouse.length;
