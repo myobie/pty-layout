@@ -101,6 +101,12 @@ export function renderFrame(
 
     // Collapsed pane (stacked layout unfocused slot): render a 1-row
     // horizontal-rule strip with the title embedded.
+    //
+    // Do NOT clear `dirty` here — we drew the strip but didn't read
+    // cells or refresh the cell cache. If we cleared dirty, the next
+    // focus switch to this pane would see dirty=false + cached cells
+    // and render stale content until more data arrived. Keeping dirty
+    // true forces a fresh `readCells()` when the pane re-expands.
     if (rect.outerHeight === 1) {
       buf.writeAnsi(
         moveTo(rect.outerRow, rect.outerCol) +
@@ -108,7 +114,6 @@ export function renderFrame(
         buildCollapsedTitleStrip(title, rect.outerWidth) +
         reset()
       );
-      pane.handle.dirty = false;
       continue;
     }
 

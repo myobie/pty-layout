@@ -457,6 +457,64 @@ describe("stacked layout", () => {
     ss = session.screenshot();
     expect(ss.text).toContain("PANE1-CONTENT");
   }, 30000);
+
+  it("activity on a collapsed pane shows on focus switch (no stale cache)", async () => {
+    // Regression: the stacked-layout collapsed branch used to clear
+    // pane.handle.dirty WITHOUT reading fresh cells, so when the user
+    // focused a pane that had activity while collapsed, the render used
+    // stale cached cells and showed nothing new until more data arrived.
+    startApp(["bash", "bash"]);
+    await session.waitForText("1/2", 15000);
+    await new Promise(r => setTimeout(r, 500));
+
+    // Go to stacked. Focus is on pane 1; pane 2 is collapsed.
+    prefixKey("l");
+    await session.waitForText("stacked", 5000);
+    session.sendKeys("\x1b"); // cancel sticky prefix
+    await new Promise(r => setTimeout(r, 300));
+
+    // Focus pane 2, type a marker — this is its "baseline"
+    prefixKey("2");
+    await session.waitForText("2/2", 5000);
+    session.type("echo BASELINE-2\r");
+    await session.waitForText("BASELINE-2", 5000);
+    await new Promise(r => setTimeout(r, 300));
+
+    // Back to pane 1 — pane 2 collapses
+    prefixKey("1");
+    await session.waitForText("1/2", 5000);
+    await new Promise(r => setTimeout(r, 300));
+
+    // Inject activity into pane 2 while it's collapsed. We use
+    // `pty send` to avoid depending on pane 1's keyboard echo.
+    // The bash in pane 2 will print a new line.
+    const sessions2 = (await listSessions())
+      .filter(s => s.status === "running")
+      .map(s => s.name);
+    // Grab the session name for pane 2 by peeking for BASELINE-2
+    let pane2Name = "";
+    for (const name of sessions2) {
+      try {
+        const { execSync } = await import("node:child_process");
+        const out = execSync(`pty peek ${name}`, {
+          encoding: "utf8", timeout: 3000,
+        });
+        if (out.includes("BASELINE-2")) { pane2Name = name; break; }
+      } catch {}
+    }
+    expect(pane2Name).not.toBe("");
+
+    // Send a distinctive command to pane 2 (bash prints it, then executes)
+    const { execSync } = await import("node:child_process");
+    execSync(`pty send ${pane2Name} --seq "echo WHILE-COLLAPSED" --seq key:return`, {
+      encoding: "utf8", timeout: 3000,
+    });
+    await new Promise(r => setTimeout(r, 500));
+
+    // Focus pane 2 — the collapsed-period output must appear immediately
+    prefixKey("2");
+    await session.waitForText("WHILE-COLLAPSED", 5000);
+  }, 45000);
 });
 
 describe("focus navigation", () => {
