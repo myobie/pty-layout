@@ -138,6 +138,10 @@ export function isPrefixPending(): boolean {
   return prefixPending;
 }
 
+export function setPrefixPending(value: boolean): void {
+  prefixPending = value;
+}
+
 /**
  * Process raw input bytes. Detects commands via:
  *   1. Ctrl+] prefix key (next keypress is a command)

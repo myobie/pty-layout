@@ -10,7 +10,7 @@ import {
 } from "./layout.ts";
 import { createAttachPane, createLocalPane, closePane, type Pane } from "./pane.ts";
 import { renderFrame, clearCellCache, renderSessionPicker, renderPrefixOverlay } from "./render.ts";
-import { processInput, isPrefixPending } from "./keys.ts";
+import { processInput, isPrefixPending, setPrefixPending } from "./keys.ts";
 import {
   type SelectionState,
   hasDragDistance,
@@ -609,6 +609,15 @@ function handlePickerInput(data: Buffer) {
         prevBuffer = null;
         scheduleRender();
       }
+      i++;
+      continue;
+    }
+
+    // Ctrl+] — swap to the command overlay (picker ↔ prefix modal).
+    if (code === 0x1d) {
+      closeSessionPicker();
+      setPrefixPending(true);
+      scheduleRender();
       i++;
       continue;
     }
