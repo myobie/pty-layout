@@ -8,7 +8,7 @@ import {
   type LayoutMode,
   type PaneRect,
 } from "./layout.ts";
-import { createAttachPane, createLocalPane, closePane, type Pane } from "./pane.ts";
+import { createAttachPane, createLocalPane, closePane, sessionPaneTitle, type Pane } from "./pane.ts";
 import { renderFrame, clearCellCache, renderSessionPicker, renderPrefixOverlay } from "./render.ts";
 import { processInput, isPrefixPending, setPrefixPending } from "./keys.ts";
 import {
@@ -1218,6 +1218,15 @@ async function main() {
         (p) => p.source.type === "session" && p.source.name === sessionName,
       );
       if (pane) removePane(pane);
+    },
+    onRename: (sessionName, displayName) => {
+      const pane = panes.find(
+        (p) => p.source.type === "session" && p.source.name === sessionName,
+      );
+      if (!pane) return;
+      pane.title = sessionPaneTitle(sessionName, displayName);
+      prevBuffer = null;
+      scheduleRender();
     },
   });
 

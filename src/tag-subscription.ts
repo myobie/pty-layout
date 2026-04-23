@@ -8,6 +8,7 @@ export interface TagFilter {
 export interface TagSubscriptionCallbacks {
   onAdd: (sessionName: string) => void;
   onRemove: (sessionName: string) => void;
+  onRename?: (sessionName: string, displayName: string | null) => void;
 }
 
 export function parseTagFilter(arg: string): TagFilter {
@@ -98,6 +99,10 @@ export class TagSubscription {
       if (this.tracked.has(event.session)) {
         this.tracked.delete(event.session);
         this.callbacks.onRemove(event.session);
+      }
+    } else if (event.type === "display_name_change") {
+      if (this.tracked.has(event.session) && this.callbacks.onRename) {
+        this.callbacks.onRename(event.session, event.value);
       }
     }
   }

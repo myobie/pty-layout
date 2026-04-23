@@ -3,7 +3,7 @@ import * as path from "node:path";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import { Session } from "@myobie/pty/testing";
-import { spawnDaemon, listSessions } from "@myobie/pty/client";
+import { spawnDaemon, listSessions, setDisplayName } from "@myobie/pty/client";
 
 const mainScript = path.resolve(import.meta.dirname, "../src/main.ts");
 
@@ -700,6 +700,29 @@ describe("tag subscription mode", () => {
     await session.waitForText("1/1", 15000);
     // And be watching for tagged sessions (won't exit when bash exits)
   }, 20000);
+
+  it("updates pane title when a tracked session is renamed", async () => {
+    const name = `tag-rename-${Date.now()}`;
+    const originalDisplay = `orig-${Date.now()}`;
+    await spawnDaemon({
+      name,
+      command: "bash",
+      args: [],
+      displayCommand: "bash",
+      displayName: originalDisplay,
+      tags: { project: "tag-rename" },
+    });
+    await new Promise(r => setTimeout(r, 500));
+
+    startApp(["--tag", "project=tag-rename"]);
+    await session.waitForText(originalDisplay, 15000);
+
+    const newDisplay = `renamed-${Date.now()}`;
+    await setDisplayName(name, newDisplay);
+
+    await session.waitForText(newDisplay, 5000);
+    await session.waitForAbsent(originalDisplay, 5000);
+  }, 25000);
 });
 
 describe("stats logging", () => {

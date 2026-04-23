@@ -39,21 +39,21 @@ export async function createSessionPane(
 /**
  * Attach to an existing named pty daemon session.
  */
+export function sessionPaneTitle(name: string, displayName: string | null | undefined): string {
+  return displayName && displayName !== name ? `@${displayName} (${name})` : `@${name}`;
+}
+
 export async function createAttachPane(name: string): Promise<Pane> {
   const handle = await attachPty(name, { cols: 80, rows: 24, scrollback: 10000 });
-  // Prefer displayName for the title; fall back to name
-  let title = `@${name}`;
+  let displayName: string | null | undefined;
   try {
     const info = await getSession(name);
-    const displayName = info?.metadata?.displayName;
-    if (displayName && displayName !== name) {
-      title = `@${displayName} (${name})`;
-    }
+    displayName = info?.metadata?.displayName;
   } catch {}
   return {
     id: nextId++,
     handle,
-    title,
+    title: sessionPaneTitle(name, displayName),
     source: { type: "session", name },
   };
 }
