@@ -171,6 +171,8 @@ export function renderFrame(
               ...cell,
               fg: cell.bg ?? [0, 0, 0],
               bg: cell.fg ?? [200, 200, 200],
+              fgIndex: cell.bgIndex,
+              bgIndex: cell.fgIndex,
             });
           } else {
             buf.setCell(rect.innerRow - 1 + r, rect.innerCol - 1 + c, cell);

@@ -148,6 +148,27 @@ describe("border colors", () => {
   }, 20000);
 });
 
+describe("palette color preservation", () => {
+  it("SGR 34 round-trips as palette blue, not VGA truecolor", async () => {
+    startApp(["bash"]);
+    await session.waitForText("1/1", 15000);
+    await new Promise((r) => setTimeout(r, 500));
+
+    // Emit palette blue + a unique output-only marker so we wait until
+    // printf has actually run (waiting on "BLUE" alone would match the
+    // command echo before printf executes). If pty-layout preserves the
+    // index through the cell pipeline, the outer terminal sees SGR 34
+    // and picks its own theme blue. If it flattens to the VGA RGB, we
+    // see "38;2;0;0;204" instead — overriding the theme.
+    session.type("printf '\\033[34mBLUETEXT\\033[0m\\n' && echo PALETTE_DONE\r");
+    await session.waitForText("PALETTE_DONE", 10000);
+
+    const ss = session.screenshot();
+    expect(ss.ansi).toMatch(/\x1b\[34m/);
+    expect(ss.ansi).not.toMatch(/38;2;0;0;204/);
+  }, 20000);
+});
+
 describe("input routing", () => {
   it("forwards keystrokes to the focused pane", async () => {
     startApp(["bash"]);
