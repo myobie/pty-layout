@@ -12,18 +12,20 @@ The core idea: **every pane is a pty session carrying a tag this layout watches*
 npm install -g @myobie/pty-layout
 ```
 
-Requires Node.js 25+. Works on macOS and Linux. Requires [@myobie/pty](https://github.com/myobie/pty).
+Requires Node.js 25+ and [@myobie/pty](https://github.com/myobie/pty) ^0.10.0. Works on macOS and Linux.
+
+Invoke as either `pty-layout` or `pty layout` — `pty` proxies any `pty-*` binary on your PATH.
 
 ## Quickstart
 
 ```sh
-pty-layout                           # auto-tag mode; opens the picker
-pty-layout --tag project=myapp       # shared-workspace mode (read-only)
-pty-layout --tmux                    # turn on the tmux shim for Claude Code agent teams
-pty-layout bash bash                 # start with two tagged shells pre-populated
+pty layout                           # auto-tag mode; opens the picker
+pty layout --tag project=myapp       # shared-workspace mode (read-only)
+pty layout --tmux                    # turn on the tmux shim for Claude Code agent teams
+pty layout bash bash                 # start with two tagged shells pre-populated
 ```
 
-Once inside, press `^]` (Ctrl + `]`) to show the command overlay. Everything useful is one more keystroke from there.
+Once inside, press `^]` (Ctrl + `]`) to show the command overlay. Everything useful is one more keystroke from there. `^\` (Ctrl + `\`) detaches the layout.
 
 ## How it works — the tag model
 
@@ -35,33 +37,40 @@ Every pty-layout instance has a **scope tag** and displays every running session
 **Opening a pane:**
 - Pick a session from `^] n` → pty-layout writes the scope tag onto the session via `updateTags()`.
 - Spawn a new session from the picker → new daemon is tagged at creation.
-- Run `pty-layout new -- <cmd>` from inside a layout shell → spawns a tagged daemon, layout auto-attaches.
-- **Anyone** (a script, another tool, Claude Code's agent-teams feature) can tag a session with the layout's key. `pty-layout` will attach automatically. That's the protocol — no RPC, just tags.
+- Run `pty layout new -- <cmd>` from inside a layout shell → spawns a tagged daemon, layout auto-attaches.
+- **Anyone** (a script, another tool, Claude Code's agent-teams feature) can tag a session with the layout's key. pty-layout will attach automatically. That's the protocol — no RPC, just tags.
 
 **Closing a pane:**
-- `^] w` or `^] \` removes the scope tag. The underlying session keeps running.
+- `^] w` removes the scope tag. The underlying session keeps running.
 - `pty gc` cleans up orphan `:l<pid>-*` tags left by crashed pty-layouts.
+
+**Renaming:** `pty rename <ref> <new-name>` updates the pane title live — no detach/reattach needed.
 
 ## Keybindings
 
 Prefix is `^]` (Ctrl + `]`). Sticky keys stay in prefix mode so you can chain actions.
 
-| Key       | Action                             |
-|-----------|------------------------------------|
-| `^]` then | (command character below)          |
-| `1`–`9`   | focus pane N (letters continue)    |
-| `,` / `.` | focus prev / next pane (sticky)    |
-| `l`       | cycle layout (sticky)              |
-| `m`       | move-pane mode (sticky)            |
-| `n`       | open session picker                |
-| `w`       | close focused pane (auto-tag only) |
-| `q`       | quit pty-layout                    |
-| `Esc`     | cancel prefix                      |
-| `^] ^]`   | cancel prefix (alt)                |
+| Key       | Action                                              |
+|-----------|-----------------------------------------------------|
+| `^]`      | enter command mode (prefix)                         |
+| `^\`      | detach the layout (unprefixed)                      |
+| `^] ^]`   | cancel prefix                                       |
+| `^] Esc`  | cancel prefix                                       |
+| `^] 1`–`9`| focus pane N (letters continue past 9)              |
+| `^] ,`    | focus previous pane (sticky)                        |
+| `^] .`    | focus next pane (sticky)                            |
+| `^] l`    | cycle layout (sticky)                               |
+| `^] m`    | move-pane mode (sticky)                             |
+| `^] n`    | open session picker                                 |
+| `^] w`    | close focused pane (auto-tag only)                  |
+| `^] q`    | quit pty-layout                                     |
+
+Inside the picker, `^]` swaps to the command overlay, and `Esc` closes it.
 
 Selection:
 
 - **Mouse click-drag** inside a pane → selection. Release → copies to clipboard via OSC 52. Wrapped lines round-trip as single logical lines (URLs, JSON, long commands).
+- **Shift-click** extends an existing selection — scroll back, shift-click, done. Covers selections longer than a screenful.
 - Scrolling moves the selection anchor with the content (selection tracks content, not screen position).
 
 ## Layouts
@@ -75,12 +84,16 @@ Cycle with `^] l`:
 
 Default cycle: `grid → stacked → single → grid`. Add `--layouts=+zoom` to include zoom.
 
+## Color & theme fidelity
+
+Palette-indexed SGR colors (`\x1b[34m`, `\x1b[38;5;Nm`, bright variants) from pane content round-trip as SGR palette codes — your outer terminal's theme colors them, not a hardcoded VGA RGB. Truecolor still passes through for programs that emit it.
+
 ## `--tmux` mode
 
 Make tools that expect `tmux` (notably [Claude Code's experimental agent-teams](https://code.claude.com/docs/en/agent-teams)) work inside pty-layout without real tmux installed.
 
 ```sh
-pty-layout --tmux --tag team=demo     # or just: pty-layout --tmux (auto-tag)
+pty layout --tmux --tag team=demo     # or just: pty layout --tmux (auto-tag)
 ```
 
 Shells spawned inside get:
@@ -93,15 +106,15 @@ Shells spawned inside get:
 
 The shim translates `split-window`, `send-keys`, `list-panes`, `kill-pane`, `display-message`, `has-session`, and the usual no-ops into pty CLI calls. Teammate sessions spawn with the layout tag, appearing in the layout via the normal subscription flow.
 
-## `pty-layout new`
+## `pty layout new`
 
 From inside any layout shell, spawn a new tagged session:
 
 ```sh
-pty-layout new -- bash                # spawn bash in a new pane
-pty-layout new --name task1 -- python run.py
-pty-layout new --cwd /tmp -- htop
-pty-layout new                        # no command → spawns $SHELL
+pty layout new -- bash                # spawn bash in a new pane
+pty layout new --name task1 -- python run.py
+pty layout new --cwd /tmp -- htop
+pty layout new                        # no command → spawns $SHELL
 ```
 
 This is a scripting primitive. It reads `$PTY_LAYOUT_FILTER_TAG` (set in every layout-spawned shell), spawns a tagged daemon session, prints the session name. The subscription auto-adds the pane.
@@ -109,15 +122,15 @@ This is a scripting primitive. It reads `$PTY_LAYOUT_FILTER_TAG` (set in every l
 ## CLI
 
 ```
-pty-layout                              # interactive, auto-tag mode
-pty-layout --tag key=value              # explicit-tag mode (repeatable)
-pty-layout --tmux                       # enable tmux shim
-pty-layout --layouts=+zoom              # add zoom to the layout cycle
-pty-layout bash bash                    # pre-populate with two tagged shells
-pty-layout new ...                      # subcommand; see above
+pty layout                              # interactive, auto-tag mode
+pty layout --tag key=value              # explicit-tag mode (repeatable)
+pty layout --tmux                       # enable tmux shim
+pty layout --layouts=+zoom              # add zoom to the layout cycle
+pty layout bash bash                    # pre-populate with two tagged shells
+pty layout new ...                      # subcommand; see above
 ```
 
-## Development
+## Contributing
 
 ```sh
 git clone https://github.com/myobie/pty-layout.git
