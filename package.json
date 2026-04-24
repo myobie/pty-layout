@@ -41,7 +41,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@myobie/pty": "^0.9.0"
+    "@myobie/pty": "^0.10.0"
   },
   "devDependencies": {
     "@types/node": "^25.3.5",
