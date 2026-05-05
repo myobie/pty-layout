@@ -659,11 +659,11 @@ function handleStdin(data: Buffer) {
   // Pane capabilities drive byte-level translation of input that the
   // outer terminal speaks (CSI u for kitty keyboard, \e[200~ markers for
   // bracketed paste) but the focused pane / its current foreground
-  // process wouldn't understand. bracketedPaste defaults to true here
-  // until pty exposes a per-pane getter — until then we keep the old
-  // unconditional pass-through for paste markers.
+  // process wouldn't understand. When the pane has the mode active, the
+  // markers / CSI u sequences pass through unchanged so the in-pane app
+  // (helix, claude, anything that opted in) handles them itself.
   const paneCaps = {
-    bracketedPaste: true,
+    bracketedPaste: focused?.handle.bracketedPasteMode ?? true,
     kittyKeyboardActive: (focused?.handle.kittyKeyboardFlags?.length ?? 0) > 0,
   };
   const actions = processInput(data, (s) => {

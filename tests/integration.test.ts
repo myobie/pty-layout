@@ -205,11 +205,7 @@ describe("input routing", () => {
     await session.waitForText("POST-SCROLL-TYPING", 10000);
   }, 30000);
 
-  // Skipped until pty exposes PtyHandle.bracketedPasteMode (spec sent to
-  // pty-claude). Once the getter lands, main.ts will pass it into
-  // processInput's paneCaps and these markers will be stripped before
-  // reaching the program reading stdin.
-  it.skip("strips bracketed-paste markers when the pane program doesn't speak them", async () => {
+  it("strips bracketed-paste markers when the pane program doesn't speak them", async () => {
     startApp(["bash"]);
     await session.waitForText("1/1", 15000);
     await new Promise((r) => setTimeout(r, 500));
