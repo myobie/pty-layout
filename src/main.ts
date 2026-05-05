@@ -655,6 +655,17 @@ function handleStdin(data: Buffer) {
   // If there's a focused pane, non-command bytes forward to it.
   // Otherwise drop them — but commands (Ctrl+], Ctrl+\) still work so the
   // user can quit or open the picker from a bare empty state.
+  //
+  // Pane capabilities drive byte-level translation of input that the
+  // outer terminal speaks (CSI u for kitty keyboard, \e[200~ markers for
+  // bracketed paste) but the focused pane / its current foreground
+  // process wouldn't understand. bracketedPaste defaults to true here
+  // until pty exposes a per-pane getter — until then we keep the old
+  // unconditional pass-through for paste markers.
+  const paneCaps = {
+    bracketedPaste: true,
+    kittyKeyboardActive: (focused?.handle.kittyKeyboardFlags?.length ?? 0) > 0,
+  };
   const actions = processInput(data, (s) => {
     if (focused && !focused.handle.exited) {
       focused.handle.write(s);
@@ -668,7 +679,7 @@ function handleStdin(data: Buffer) {
         prevBuffer = null;
       }
     }
-  });
+  }, paneCaps);
 
   if (isPrefixPending() !== wasPrefixed) {
     // If prefix mode exits without a follow-up position key (e.g. Esc),

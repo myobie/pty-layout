@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-_Nothing yet._
+- Fix Ctrl+W (and other Ctrl-letter / Alt-letter / Ctrl+Alt-letter combos) inserting literal `\e[…u` garbage in panes whose foreground program doesn't speak the kitty keyboard protocol (bash readline, naive curses apps). When the focused pane has no kitty keyboard flags pushed, CSI u sequences other than our own keybindings (`^]`, `^\`) are translated back to their legacy byte form before reaching the pane.
+- Cross-call buffering of partial CSI u and bracketed-paste sequences so OS-level read fragmentation during paste / mid-keystroke doesn't leak ESC garbage to the pane.
 
 ## 0.1.0
 

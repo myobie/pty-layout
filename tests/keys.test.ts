@@ -1,11 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { processInput, isPrefixPending } from "../src/keys.ts";
+import { processInput, isPrefixPending, _resetKeyState } from "../src/keys.ts";
 
-// Reset prefix state before each test
+// Reset prefix state and any held tail bytes before each test
 beforeEach(() => {
-  while (isPrefixPending()) {
-    processInput(Buffer.from("\x1b"), () => {});
-  }
+  _resetKeyState();
 });
 
 describe("regular input forwarding", () => {
@@ -548,5 +546,402 @@ describe("SGR mouse events", () => {
     expect(actions).toEqual([]);
     // Should be forwarded (not consumed)
     expect(write).toHaveBeenCalled();
+  });
+});
+
+describe("legacy-mode pane translation", () => {
+  describe("CSI u → legacy when pane has no kitty keyboard", () => {
+    it("Ctrl+W (codepoint 119, mod 5) translates to 0x17", () => {
+      const write = vi.fn();
+      const actions = processInput(
+        Buffer.from("\x1b[119;5u"),
+        write,
+        { bracketedPaste: true, kittyKeyboardActive: false },
+      );
+      expect(actions).toEqual([]);
+      expect(write).toHaveBeenCalledWith("\x17");
+    });
+
+    it("Ctrl+A (codepoint 97, mod 5) translates to 0x01", () => {
+      const write = vi.fn();
+      processInput(
+        Buffer.from("\x1b[97;5u"),
+        write,
+        { bracketedPaste: true, kittyKeyboardActive: false },
+      );
+      expect(write).toHaveBeenCalledWith("\x01");
+    });
+
+    it("Alt+F (codepoint 102, mod 3) translates to ESC + f", () => {
+      const write = vi.fn();
+      processInput(
+        Buffer.from("\x1b[102;3u"),
+        write,
+        { bracketedPaste: true, kittyKeyboardActive: false },
+      );
+      expect(write).toHaveBeenCalledWith("\x1bf");
+    });
+
+    it("Ctrl+Alt+W (codepoint 119, mod 7) translates to ESC + 0x17", () => {
+      const write = vi.fn();
+      processInput(
+        Buffer.from("\x1b[119;7u"),
+        write,
+        { bracketedPaste: true, kittyKeyboardActive: false },
+      );
+      expect(write).toHaveBeenCalledWith("\x1b\x17");
+    });
+
+    it("plain ASCII key with mod 1 (no mods) translates to the char", () => {
+      const write = vi.fn();
+      processInput(
+        Buffer.from("\x1b[97;1u"),
+        write,
+        { bracketedPaste: true, kittyKeyboardActive: false },
+      );
+      expect(write).toHaveBeenCalledWith("a");
+    });
+
+    it("Ctrl+W passes through unchanged when pane HAS kitty keyboard", () => {
+      const write = vi.fn();
+      processInput(
+        Buffer.from("\x1b[119;5u"),
+        write,
+        { bracketedPaste: true, kittyKeyboardActive: true },
+      );
+      expect(write).toHaveBeenCalledWith("\x1b[119;5u");
+    });
+
+    it("Ctrl+] still consumed as prefix even with kittyKeyboardActive false", () => {
+      const write = vi.fn();
+      const actions = processInput(
+        Buffer.from("\x1b[93;5u"),
+        write,
+        { bracketedPaste: true, kittyKeyboardActive: false },
+      );
+      expect(actions).toEqual([]);
+      expect(isPrefixPending()).toBe(true);
+      expect(write).not.toHaveBeenCalled();
+    });
+
+    it("text around an unmapped CSI u sequence is still forwarded", () => {
+      const write = vi.fn();
+      processInput(
+        Buffer.from("ab\x1b[119;5ucd"),
+        write,
+        { bracketedPaste: true, kittyKeyboardActive: false },
+      );
+      const calls = write.mock.calls.flat().join("");
+      expect(calls).toBe("ab\x17cd");
+    });
+
+    it("default paneCaps preserves current passthrough behavior", () => {
+      const write = vi.fn();
+      processInput(Buffer.from("\x1b[119;5u"), write);
+      expect(write).toHaveBeenCalledWith("\x1b[119;5u");
+    });
+  });
+
+  describe("bracketed paste markers stripped when pane has no bracketed paste", () => {
+    it("\\e[200~hello\\e[201~ becomes 'hello'", () => {
+      const write = vi.fn();
+      processInput(
+        Buffer.from("\x1b[200~hello\x1b[201~"),
+        write,
+        { bracketedPaste: false, kittyKeyboardActive: true },
+      );
+      const calls = write.mock.calls.flat().join("");
+      expect(calls).toBe("hello");
+    });
+
+    it("markers passthrough when pane HAS bracketed paste", () => {
+      const write = vi.fn();
+      processInput(
+        Buffer.from("\x1b[200~hello\x1b[201~"),
+        write,
+        { bracketedPaste: true, kittyKeyboardActive: true },
+      );
+      const calls = write.mock.calls.flat().join("");
+      expect(calls).toBe("\x1b[200~hello\x1b[201~");
+    });
+
+    it("text before, between, and after markers all forwarded", () => {
+      const write = vi.fn();
+      processInput(
+        Buffer.from("pre\x1b[200~mid\x1b[201~post"),
+        write,
+        { bracketedPaste: false, kittyKeyboardActive: true },
+      );
+      const calls = write.mock.calls.flat().join("");
+      expect(calls).toBe("premidpost");
+    });
+  });
+});
+
+describe("legacy-mode pane translation — edge cases", () => {
+  it("multiple CSI u sequences in a single buffer all translate", () => {
+    const write = vi.fn();
+    // Ctrl+A, Ctrl+E, Ctrl+W — common readline edits in a row.
+    processInput(
+      Buffer.from("\x1b[97;5u\x1b[101;5u\x1b[119;5u"),
+      write,
+      { bracketedPaste: true, kittyKeyboardActive: false },
+    );
+    const calls = write.mock.calls.flat().join("");
+    expect(calls).toBe("\x01\x05\x17");
+  });
+
+  it("CSI u between regular text segments", () => {
+    const write = vi.fn();
+    processInput(
+      Buffer.from("hello\x1b[119;5uworld"),
+      write,
+      { bracketedPaste: true, kittyKeyboardActive: false },
+    );
+    expect(write.mock.calls.flat().join("")).toBe("hello\x17world");
+  });
+
+  it("paneCaps swap between calls — translation applies per-call", () => {
+    const write = vi.fn();
+    // Simulates a focus switch: first pane has kitty keyboard on, then
+    // the user switches focus to a pane that doesn't.
+    processInput(
+      Buffer.from("\x1b[119;5u"),
+      write,
+      { bracketedPaste: true, kittyKeyboardActive: true },
+    );
+    processInput(
+      Buffer.from("\x1b[119;5u"),
+      write,
+      { bracketedPaste: true, kittyKeyboardActive: false },
+    );
+    expect(write.mock.calls.flat().join("")).toBe("\x1b[119;5u\x17");
+  });
+
+  it("unmatched bracketed-paste begin marker still strips the marker", () => {
+    // We have no idea where the paste ends; stripping the open marker is
+    // still better than leaking ESC garbage. Content trails as usual.
+    const write = vi.fn();
+    processInput(
+      Buffer.from("\x1b[200~hello"),
+      write,
+      { bracketedPaste: false, kittyKeyboardActive: true },
+    );
+    expect(write.mock.calls.flat().join("")).toBe("hello");
+  });
+
+  it("Ctrl+letter codepoint in uppercase (codepoint 87 = 'W') translates the same as lowercase", () => {
+    const write = vi.fn();
+    processInput(
+      Buffer.from("\x1b[87;5u"),
+      write,
+      { bracketedPaste: true, kittyKeyboardActive: false },
+    );
+    expect(write).toHaveBeenCalledWith("\x17");
+  });
+
+  it("special-key CSI u (e.g. F5 with Ctrl) without legacy mapping passes through", () => {
+    // F5 in CSI u is codepoint 57376 (0xE015 in kitty's PUA range).
+    // No clean legacy mapping; should forward verbatim.
+    const write = vi.fn();
+    processInput(
+      Buffer.from("\x1b[57376;5u"),
+      write,
+      { bracketedPaste: true, kittyKeyboardActive: false },
+    );
+    expect(write.mock.calls.flat().join("")).toBe("\x1b[57376;5u");
+  });
+
+  it("CSI u split across two buffer chunks", () => {
+    // A real concern when the outer terminal generates CSI u and the
+    // OS delivers it in two reads. Documents current behavior; if this
+    // ever fails, processInput needs cross-call buffering.
+    const write = vi.fn();
+    processInput(
+      Buffer.from("\x1b[119;5"),
+      write,
+      { bracketedPaste: true, kittyKeyboardActive: false },
+    );
+    processInput(
+      Buffer.from("u"),
+      write,
+      { bracketedPaste: true, kittyKeyboardActive: false },
+    );
+    expect(write.mock.calls.flat().join("")).toBe("\x17");
+  });
+
+  it("bracketed-paste markers split across two buffer chunks", () => {
+    const write = vi.fn();
+    processInput(
+      Buffer.from("\x1b[20"),
+      write,
+      { bracketedPaste: false, kittyKeyboardActive: true },
+    );
+    processInput(
+      Buffer.from("0~hello\x1b[201~"),
+      write,
+      { bracketedPaste: false, kittyKeyboardActive: true },
+    );
+    expect(write.mock.calls.flat().join("")).toBe("hello");
+  });
+});
+
+describe("legacy-mode pane translation — state hygiene", () => {
+  it("ESC alone is flushed, not held — menu dismissal stays instant", () => {
+    const write = vi.fn();
+    processInput(
+      Buffer.from("\x1b"),
+      write,
+      { bracketedPaste: false, kittyKeyboardActive: false },
+    );
+    // Esc must reach the pane immediately so curses apps / shells can
+    // dismiss menus / cancel modes — never hold a bare ESC waiting for
+    // a follow-up that may never come.
+    expect(write).toHaveBeenCalledWith("\x1b");
+  });
+
+  it("pendingTail is dropped by _resetKeyState (test isolation)", () => {
+    const writeA = vi.fn();
+    processInput(
+      Buffer.from("\x1b[119;5"),
+      writeA,
+      { bracketedPaste: true, kittyKeyboardActive: false },
+    );
+    expect(writeA).not.toHaveBeenCalled();
+    _resetKeyState();
+    const writeB = vi.fn();
+    processInput(
+      Buffer.from("u"),
+      writeB,
+      { bracketedPaste: true, kittyKeyboardActive: false },
+    );
+    // Without reset, B would have produced \x17. After reset, it's a
+    // bare 'u' character — forwarded as-is, no translation.
+    expect(writeB).toHaveBeenCalledWith("u");
+  });
+
+  it("non-ASCII unicode codepoint with no mods passes through", () => {
+    const write = vi.fn();
+    // U+00E9 = é (codepoint 233)
+    processInput(
+      Buffer.from("\x1b[233;1u"),
+      write,
+      { bracketedPaste: true, kittyKeyboardActive: false },
+    );
+    expect(write).toHaveBeenCalledWith("é");
+  });
+
+  it("empty buffer is a no-op (no actions, no writes)", () => {
+    const write = vi.fn();
+    const actions = processInput(
+      Buffer.from(""),
+      write,
+      { bracketedPaste: false, kittyKeyboardActive: false },
+    );
+    expect(actions).toEqual([]);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("held tail is finally flushed when the follow-up bytes don't extend the sequence", () => {
+    const write = vi.fn();
+    // \e[ is held (could be CSI u start)
+    processInput(
+      Buffer.from("\x1b["),
+      write,
+      { bracketedPaste: true, kittyKeyboardActive: false },
+    );
+    expect(write).not.toHaveBeenCalled();
+
+    // Follow-up: 'A' is a CSI terminator but not 'u' — not CSI u at all
+    // (it's an arrow key sequence). We should now flush the tail + 'A'
+    // verbatim so the pane's app sees the complete escape.
+    processInput(
+      Buffer.from("A"),
+      write,
+      { bracketedPaste: true, kittyKeyboardActive: false },
+    );
+    expect(write.mock.calls.flat().join("")).toBe("\x1b[A");
+  });
+
+  it("permissive default never holds — backward-compatible passthrough", () => {
+    const write = vi.fn();
+    // Same input as the held case above but with default (permissive) caps.
+    processInput(Buffer.from("\x1b["), write);
+    expect(write).toHaveBeenCalledWith("\x1b[");
+  });
+});
+
+describe("prefix mode + kitty CSI u keys (legacy translation routes correctly)", () => {
+  it("CSI u 'w' (codepoint 119, no mods) in prefix mode triggers closePane", () => {
+    const write = vi.fn();
+    // Enter prefix
+    processInput(
+      Buffer.from("\x1b[93;5u"), // Ctrl+] via CSI u
+      write,
+      { bracketedPaste: true, kittyKeyboardActive: false },
+    );
+    expect(isPrefixPending()).toBe(true);
+
+    // 'w' as a CSI u keypress (modifier 1 = no mods).
+    const actions = processInput(
+      Buffer.from("\x1b[119;1u"),
+      write,
+      { bracketedPaste: true, kittyKeyboardActive: false },
+    );
+    expect(actions).toEqual([{ type: "closePane" }]);
+    expect(isPrefixPending()).toBe(false);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("CSI u 'q' in prefix mode triggers quit", () => {
+    const write = vi.fn();
+    processInput(Buffer.from("\x1b[93;5u"), write, {
+      bracketedPaste: true,
+      kittyKeyboardActive: false,
+    });
+    const actions = processInput(Buffer.from("\x1b[113;1u"), write, {
+      bracketedPaste: true,
+      kittyKeyboardActive: false,
+    });
+    expect(actions).toEqual([{ type: "quit" }]);
+  });
+
+  it("CSI u position digit '1' in prefix mode focuses pane 1", () => {
+    const write = vi.fn();
+    processInput(Buffer.from("\x1b[93;5u"), write, {
+      bracketedPaste: true,
+      kittyKeyboardActive: false,
+    });
+    // '1' = codepoint 49
+    const actions = processInput(Buffer.from("\x1b[49;1u"), write, {
+      bracketedPaste: true,
+      kittyKeyboardActive: false,
+    });
+    expect(actions).toEqual([{ type: "focusIndex", index: 0 }]);
+  });
+
+  it("CSI u sticky '.' (focusNext) in prefix mode keeps prefix active", () => {
+    const write = vi.fn();
+    processInput(Buffer.from("\x1b[93;5u"), write, {
+      bracketedPaste: true,
+      kittyKeyboardActive: false,
+    });
+    // '.' = codepoint 46
+    const actions = processInput(Buffer.from("\x1b[46;1u"), write, {
+      bracketedPaste: true,
+      kittyKeyboardActive: false,
+    });
+    expect(actions).toEqual([{ type: "focusNext" }]);
+    expect(isPrefixPending()).toBe(true);
+  });
+
+  it("CSI u Ctrl+A outside prefix mode translates to 0x01 (forwarded)", () => {
+    const write = vi.fn();
+    processInput(Buffer.from("\x1b[97;5u"), write, {
+      bracketedPaste: true,
+      kittyKeyboardActive: false,
+    });
+    expect(write).toHaveBeenCalledWith("\x01");
+    expect(isPrefixPending()).toBe(false);
   });
 });

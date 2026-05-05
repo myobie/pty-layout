@@ -154,17 +154,20 @@ describe("palette color preservation", () => {
     await session.waitForText("1/1", 15000);
     await new Promise((r) => setTimeout(r, 500));
 
-    // Emit palette blue + a unique output-only marker so we wait until
-    // printf has actually run (waiting on "BLUE" alone would match the
-    // command echo before printf executes). If pty-layout preserves the
-    // index through the cell pipeline, the outer terminal sees SGR 34
-    // and picks its own theme blue. If it flattens to the VGA RGB, we
-    // see "38;2;0;0;204" instead — overriding the theme.
-    session.type("printf '\\033[34mBLUETEXT\\033[0m\\n' && echo PALETTE_DONE\r");
-    await session.waitForText("PALETTE_DONE", 10000);
-
-    const ss = session.screenshot();
-    expect(ss.ansi).toMatch(/\x1b\[34m/);
+    // Emit palette blue. Wait directly on the SGR 34 byte sequence
+    // appearing in the screen ANSI — this only happens after printf
+    // actually executes (waiting on text like "BLUE" or any string in
+    // the typed command would match the readline echo before the
+    // command runs). If pty-layout preserves the index through the
+    // cell pipeline, the outer terminal sees SGR 34 and picks its own
+    // theme blue. If it flattens to the VGA RGB, we'd see
+    // "38;2;0;0;204" — overriding the theme.
+    session.type("printf '\\033[34mBLUETEXT\\033[0m\\n'\r");
+    const ss = await session.waitFor(
+      (s) => s.ansi.includes("\x1b[34m"),
+      10000,
+      "SGR 34 reaches the outer terminal",
+    );
     expect(ss.ansi).not.toMatch(/38;2;0;0;204/);
   }, 20000);
 });
@@ -201,6 +204,61 @@ describe("input routing", () => {
     session.type("echo POST-SCROLL-TYPING\r");
     await session.waitForText("POST-SCROLL-TYPING", 10000);
   }, 30000);
+
+  // Skipped until pty exposes PtyHandle.bracketedPasteMode (spec sent to
+  // pty-claude). Once the getter lands, main.ts will pass it into
+  // processInput's paneCaps and these markers will be stripped before
+  // reaching the program reading stdin.
+  it.skip("strips bracketed-paste markers when the pane program doesn't speak them", async () => {
+    startApp(["bash"]);
+    await session.waitForText("1/1", 15000);
+    await new Promise((r) => setTimeout(r, 500));
+
+    // Run a primitive line reader that doesn't go through readline.
+    // bash's `read` builtin reads raw bytes — perfect repro of the
+    // user's gets()-using CLI.
+    session.type("read -r LINE && printf 'GOT=[%s]\\n' \"$LINE\"\r");
+    await new Promise((r) => setTimeout(r, 300));
+
+    // Simulate an outer-terminal bracketed paste of "hello world".
+    session.sendKeys("\x1b[200~hello world\x1b[201~");
+    session.sendKeys("\r");
+
+    // With the fix, `read` captures plain "hello world".
+    // Without the fix, it captures the literal markers too and we'd see
+    // ESC chars or the literal "[200~" / "[201~" in the output.
+    await session.waitFor(
+      (s) => s.text.includes("GOT=[hello world]"),
+      10000,
+      "read captures the paste content with markers stripped",
+    );
+    const ss = session.screenshot();
+    expect(ss.text).toContain("GOT=[hello world]");
+    expect(ss.text).not.toMatch(/200~|201~/);
+  }, 25000);
+
+  it("translates kitty CSI u Ctrl+W to legacy 0x17 for bash readline", async () => {
+    startApp(["bash"]);
+    await session.waitForText("1/1", 15000);
+    await new Promise((r) => setTimeout(r, 500));
+
+    // Type a marker the prompt will display, then send Ctrl+W as a
+    // kitty CSI u sequence (codepoint 119 = 'w', modifier 5 = ctrl).
+    // Bash readline doesn't have kitty keyboard enabled, so it would
+    // see the literal ESC sequence as gibberish without translation.
+    // With translation it gets 0x17 and rubs out the previous word.
+    session.type("uniqueXYZQQQ");
+    await session.waitForText("uniqueXYZQQQ", 10000);
+    session.sendKeys("\x1b[119;5u");
+    await new Promise((r) => setTimeout(r, 300));
+
+    // After ^W readline rubs out the whole word; the marker should be
+    // gone from the prompt line. The literal "119" only appears on
+    // screen if the CSI u bytes leaked through untranslated.
+    const ss = session.screenshot();
+    expect(ss.text).not.toContain("uniqueXYZQQQ");
+    expect(ss.text).not.toContain("119");
+  }, 25000);
 });
 
 describe("pane management", () => {
@@ -801,6 +859,33 @@ describe("session picker", () => {
     // Ctrl+] alone should show the help overlay
     session.sendKeys("\x1d");
     await session.waitForText("prev pane", 5000);
+  }, 20000);
+
+  it("kitty CSI u Esc inside the picker closes it (doesn't leak through)", async () => {
+    startApp();
+    await session.waitForText("Sessions", 15000);
+    // \e[27u is the kitty CSI u form for plain Esc. Picker should close.
+    session.sendKeys("\x1b[27u");
+    await session.waitForText("^] n to open session picker", 5000);
+  }, 20000);
+
+  // Documents a known edge case: when the picker is open and the outer
+  // terminal is encoding keys via kitty CSI u (because a previously
+  // focused pane had it on and we proxy the flags up), the picker's
+  // ESC + plain `[A`/`[B` arrow key handler doesn't see the standard
+  // form and falls through to "bare ESC" which closes the picker. Ideal
+  // fix: route picker input through the same translation layer used for
+  // pane forwarding, OR push \e[>0u when the picker opens. Skipped until
+  // we land that. Repro: kitty-encoded Up arrow as CSI 1;5A or CSI 57352u.
+  it.skip("kitty CSI u arrow keys move the picker selection", async () => {
+    startApp();
+    await session.waitForText("Sessions", 15000);
+    // Down arrow as kitty CSI u (codepoint 57353 ≈ U+E029, varies by spec).
+    session.sendKeys("\x1b[57353u");
+    await new Promise((r) => setTimeout(r, 200));
+    // The picker should still be open (selection moved, not closed).
+    const ss = session.screenshot();
+    expect(ss.text).toContain("Sessions");
   }, 20000);
 
   it("^\\ from empty state quits the app", async () => {

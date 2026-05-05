@@ -24,9 +24,66 @@ export interface Action {
   shift?: boolean;
 }
 
+/** Capabilities the focused pane has currently advertised. Drives translation
+ *  of input bytes that the outer terminal speaks but the pane wouldn't
+ *  understand. Default is permissive (no translation) so existing callers
+ *  and tests are unaffected. */
+export interface PaneCaps {
+  /** True if the pane has \e[?2004h active. False means strip
+   *  \e[200~/\e[201~ markers before forwarding (the program reading stdin
+   *  doesn't know about bracketed paste). */
+  bracketedPaste: boolean;
+  /** True if the pane has any kitty keyboard progressive-enhancement flags
+   *  active. False means translate CSI u sequences to their legacy bytes
+   *  (e.g. Ctrl+W → 0x17) before forwarding, so apps that don't speak the
+   *  protocol see what they expect. */
+  kittyKeyboardActive: boolean;
+}
+
+const PERMISSIVE_CAPS: PaneCaps = { bracketedPaste: true, kittyKeyboardActive: true };
+
 // Keys that stay in prefix mode after executing (for repeated navigation).
 // `m` stays active so the next keypress is interpreted as a move target.
 const STICKY_KEYS = new Set([",", ".", "m", "l"]);
+
+/** Translate a kitty CSI u key event to its legacy byte form, if a clean
+ *  legacy form exists. Returns null when there's no obvious mapping (e.g.
+ *  a special key with modifiers we don't have a legacy escape for) — the
+ *  caller should forward the original CSI u verbatim in that case. */
+function csiUToLegacy(codepoint: number, modifier: number): string | null {
+  const mods = modifier - 1;
+  const ctrl = !!(mods & 4);
+  const alt = !!(mods & 2);
+  const cp = codepoint;
+
+  // No mods: just the char (codepoints are unicode scalar values).
+  if (mods === 0) {
+    if (cp >= 0x20 && cp < 0x10000) return String.fromCharCode(cp);
+    return null;
+  }
+
+  // Alt only: ESC + char.
+  if (alt && !ctrl) {
+    if (cp >= 0x20 && cp < 0x10000) return "\x1b" + String.fromCharCode(cp);
+    return null;
+  }
+
+  // Ctrl + letter: 0x01..0x1a.
+  if (ctrl && !alt) {
+    if (cp >= 0x61 && cp <= 0x7a) return String.fromCharCode(cp - 0x60);
+    if (cp >= 0x41 && cp <= 0x5a) return String.fromCharCode(cp - 0x40);
+    return null;
+  }
+
+  // Ctrl+Alt+letter: ESC + ctrl byte.
+  if (ctrl && alt) {
+    if (cp >= 0x61 && cp <= 0x7a) return "\x1b" + String.fromCharCode(cp - 0x60);
+    if (cp >= 0x41 && cp <= 0x5a) return "\x1b" + String.fromCharCode(cp - 0x40);
+    return null;
+  }
+
+  return null;
+}
 
 const COMMAND_MAP: Record<string, Action> = {
   l: { type: "cycleLayout" },
@@ -134,12 +191,46 @@ function parseCsiU(
 // Ctrl+] prefix state
 let prefixPending = false;
 
+// Bytes from a previous processInput() call that looked like the start of
+// a sequence we'd want to translate (CSI u or bracketed-paste marker) but
+// arrived incomplete. Held across calls so OS-level read fragmentation
+// during paste, etc. doesn't leak ESC garbage to the pane.
+let pendingTail = "";
+
+const PASTE_MARKERS = ["\x1b[200~", "\x1b[201~"];
+const MAX_PENDING_TAIL = 32;
+
+function isIncompletePasteMarker(s: string): boolean {
+  if (s[0] !== "\x1b") return false;
+  if (s.length < 2 || s[1] !== "[") return false;
+  if (s.length >= 6) return false;
+  return PASTE_MARKERS.some((m) => m.startsWith(s));
+}
+
+function isIncompleteCsiU(s: string): boolean {
+  if (s[0] !== "\x1b") return false;
+  if (s.length < 2 || s[1] !== "[") return false;
+  if (s.length === 2) return true;
+  for (let k = 2; k < s.length; k++) {
+    const ch = s[k]!;
+    if ((ch >= "0" && ch <= "9") || ch === ";" || ch === ":") continue;
+    return false;
+  }
+  return true;
+}
+
 export function isPrefixPending(): boolean {
   return prefixPending;
 }
 
 export function setPrefixPending(value: boolean): void {
   prefixPending = value;
+}
+
+/** Test-only: clear any held bytes and the prefix flag. */
+export function _resetKeyState(): void {
+  prefixPending = false;
+  pendingTail = "";
 }
 
 /**
@@ -153,9 +244,13 @@ export function setPrefixPending(value: boolean): void {
 export function processInput(
   data: Buffer,
   write: (s: string) => void,
+  paneCaps: PaneCaps = PERMISSIVE_CAPS,
 ): Action[] {
   const actions: Action[] = [];
-  const str = data.toString("utf8");
+  const incoming = data.toString("utf8");
+  // Prepend any bytes held from a previous incomplete sequence.
+  let str = pendingTail + incoming;
+  pendingTail = "";
   let i = 0;
   let forwardStart = 0;
 
@@ -207,6 +302,25 @@ export function processInput(
       }
     }
 
+    // --- Bracketed paste markers ---
+    // When the focused pane hasn't enabled \e[?2004h, strip \e[200~ /
+    // \e[201~ before they reach a stdin-reading program that would
+    // otherwise see them as garbage characters mixed into pasted content.
+    if (
+      !paneCaps.bracketedPaste &&
+      str[i] === "\x1b" &&
+      str[i + 1] === "[" &&
+      str[i + 2] === "2" &&
+      (str[i + 3] === "0") &&
+      (str[i + 4] === "0" || str[i + 4] === "1") &&
+      str[i + 5] === "~"
+    ) {
+      flush(i);
+      i += 6;
+      forwardStart = i;
+      continue;
+    }
+
     // --- CSI u keybindings (kitty keyboard protocol) ---
     // When the kitty keyboard protocol is active, Ctrl+] and Ctrl+\ are
     // encoded as CSI u sequences instead of raw control characters.
@@ -233,6 +347,19 @@ export function processInput(
           i += csiU.length;
           forwardStart = i;
           continue;
+        }
+        // Not one of our keybindings. If the focused pane doesn't speak
+        // CSI u, translate to a legacy byte form so the rest of the loop
+        // (prefix-mode handling, ^]/^\ raw, plain forwarding) processes
+        // it as if the user had typed the legacy form. Splice in place
+        // and continue without advancing `i` so the new bytes are
+        // re-evaluated from the top of the loop.
+        if (!paneCaps.kittyKeyboardActive) {
+          const legacy = csiUToLegacy(csiU.codepoint, csiU.modifier);
+          if (legacy !== null) {
+            str = str.slice(0, i) + legacy + str.slice(i + csiU.length);
+            continue;
+          }
         }
       }
     }
@@ -330,6 +457,29 @@ export function processInput(
     }
 
     i++;
+  }
+
+  // Cross-call buffering: if the unflushed tail looks like the start of a
+  // sequence we'd want to translate (CSI u when the pane has no kitty
+  // keyboard, or a bracketed-paste marker when the pane has no bracketed
+  // paste), hold it instead of flushing. Bounded by MAX_PENDING_TAIL so
+  // we don't sit on bytes forever if the source goes silent.
+  if (forwardStart < str.length) {
+    let lastEsc = -1;
+    for (let k = forwardStart; k < str.length; k++) {
+      if (str[k] === "\x1b") lastEsc = k;
+    }
+    if (lastEsc >= 0 && str.length - lastEsc <= MAX_PENDING_TAIL) {
+      const tail = str.slice(lastEsc);
+      const wantHold =
+        (!paneCaps.bracketedPaste && isIncompletePasteMarker(tail)) ||
+        (!paneCaps.kittyKeyboardActive && isIncompleteCsiU(tail));
+      if (wantHold) {
+        if (lastEsc > forwardStart) write(str.slice(forwardStart, lastEsc));
+        pendingTail = tail;
+        return actions;
+      }
+    }
   }
 
   flush(str.length);
